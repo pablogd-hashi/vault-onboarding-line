@@ -300,6 +300,117 @@ onboarding/bin/apply --all
 
 The script refuses any address that is not on 127.0.0.1. For a shared Vault, the apply belongs in a pipeline with an approval step. [examples/apply-shared-vault.yml](examples/apply-shared-vault.yml) shows the shape. It is an example and has not been run.
 
+## Examples to try
+
+These five examples show the line saying yes and saying no. Each command files an issue with the same fields as the form. Run the commands in the repository folder. `gh` prints the issue number.
+
+Example 1 is the same kind of request as issue 1, which ran and merged. Example 5 was run and gives the result shown. Examples 2, 3 and 4 have not been run as real issues yet. What they should do is described from how the line is built.
+
+### 1. A plain onboarding
+
+```bash
+gh issue create --label onboard --title "Onboard orders-api to Vault" --body $'### Service name\n\norders-api\n\n### Team\n\ncommerce\n\n### Kubernetes namespace\n\ncommerce\n\n### Kubernetes service account\n\norders-api\n\n### Secret paths\n\nsecret/teams/commerce/orders-api/config\n\n### Acceptance criteria\n\norders-api can read its secrets.'
+```
+
+Then, in Claude Code:
+
+```
+/onboard run <number>
+```
+
+The card goes through every lane and stops in **Ready to apply**. The issue gets the label `onboard:ready-to-apply`. Apply it as in step 11.
+
+### 2. A request with no namespace
+
+```bash
+gh issue create --label onboard --title "Onboard billing-worker to Vault" --body $'### Service name\n\nbilling-worker\n\n### Team\n\nbilling\n\n### Kubernetes namespace\n\n_No response_\n\n### Kubernetes service account\n\nbilling-worker\n\n### Secret paths\n\nsecret/teams/billing/billing-worker/config\n\n### Acceptance criteria\n\nbilling-worker can read its secrets.'
+```
+
+Run it with `/onboard run <number>`.
+
+Intake should ask for the namespace in a comment on the issue. The label becomes `onboard:needs-info` and the card moves to **Needs you**. No branch and no pull request are created.
+
+To continue, answer on the issue, for example "The namespace is billing". Then run `/onboard run <number>` again. Intake reads the answer and the job goes on.
+
+### 3. A request for another team's path
+
+```bash
+gh issue create --label onboard --title "Onboard search-indexer to Vault" --body $'### Service name\n\nsearch-indexer\n\n### Team\n\ndiscovery\n\n### Kubernetes namespace\n\ndiscovery\n\n### Kubernetes service account\n\nsearch-indexer\n\n### Secret paths\n\nsecret/teams/discovery/search-indexer/config, secret/teams/billing/billing-worker/config\n\n### Acceptance criteria\n\nsearch-indexer can read its secrets.'
+```
+
+Run it with `/onboard run <number>`.
+
+Intake should reject it. The second path belongs to team billing. The reason is a comment on the issue, the issue is closed, and the card goes to **Done** with its title struck through. No branch and no pull request are created.
+
+### 4. Three at once
+
+File three requests:
+
+```bash
+gh issue create --label onboard --title "Onboard ledger-api to Vault" --body $'### Service name\n\nledger-api\n\n### Team\n\nfinance\n\n### Kubernetes namespace\n\nfinance\n\n### Kubernetes service account\n\nledger-api\n\n### Secret paths\n\nsecret/teams/finance/ledger-api/config\n\n### Acceptance criteria\n\nledger-api can read its secrets.'
+```
+
+```bash
+gh issue create --label onboard --title "Onboard notify-worker to Vault" --body $'### Service name\n\nnotify-worker\n\n### Team\n\nplatform\n\n### Kubernetes namespace\n\nplatform\n\n### Kubernetes service account\n\nnotify-worker\n\n### Secret paths\n\nsecret/teams/platform/notify-worker/config\n\n### Acceptance criteria\n\nnotify-worker can read its secrets.'
+```
+
+```bash
+gh issue create --label onboard --title "Onboard catalog-api to Vault" --body $'### Service name\n\ncatalog-api\n\n### Team\n\ncommerce\n\n### Kubernetes namespace\n\ncommerce\n\n### Kubernetes service account\n\ncatalog-api\n\n### Secret paths\n\nsecret/teams/commerce/catalog-api/config\n\n### Acceptance criteria\n\ncatalog-api can read its secrets.'
+```
+
+Then run all of them:
+
+```
+/onboard run
+```
+
+Three cards should move at the same time, each with a dot while it runs. Each job has its own worktree:
+
+```bash
+git worktree list
+```
+
+Three is the limit. If a fourth issue is open, it stays queued until a slot is free.
+
+### 5. A policy that grants too much
+
+A job cannot do this. A wider policy needs a change to the module, and the gate stops a branch that touches anything outside its own request folder. To see the gate refuse a wide policy, give it a changed copy of the module by hand.
+
+Make the copy and add `update` and `delete` to it:
+
+```bash
+cp -R terraform/modules/vault-service-onboard /tmp/wide-module
+```
+
+```bash
+sed -i '' 's/capabilities = \["read", "list"\]/capabilities = ["read", "list", "update", "delete"]/' /tmp/wide-module/main.tf
+```
+
+Run the gate on the example request with that copy:
+
+```bash
+onboarding/bin/gate --request PE-001-payments-api --module-dir /tmp/wide-module
+```
+
+The gate fails in two places. Conftest reads the plan and refuses the policy text. Then the test on the throwaway Vault shows what the policy really allows:
+
+```
+conftest on the plan                FAIL  policy "payments-payments-api": path "secret/data/teams/payments/payments-api/*" must grant only read and list
+denied: write own secret            FAIL  HTTP 200
+denied: delete own secret           FAIL  HTTP 204
+denied: delete own metadata         FAIL  HTTP 204
+own secret unchanged after attempts FAIL  HTTP 404
+GATE: FAIL (5 of 34 failed)
+```
+
+The write returned 200 and the delete returned 204. They should have been refused with 403.
+
+Remove the copy:
+
+```bash
+rm -rf /tmp/wide-module
+```
+
 ## Try it without GitHub
 
 `ONBOARD_OFFLINE=1` makes the state script skip every GitHub call and print what it would have done. The sample issues are in `onboarding/examples/`.
