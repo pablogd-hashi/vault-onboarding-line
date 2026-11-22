@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(terraform *)",
+      "Bash(vault *)",
+      "Bash(conftest *)",
+      "Bash(onboarding/bin/*)",
+      "Bash(python3 onboarding/board/serve.py*)",
+      "Bash(python3 .claude/hooks/guard_test.py*)",
+      "Bash(cd *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(grep *)",
+      "Bash(diff *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.py\"",
+            "timeout": 15,
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.py\"",
+            "timeout": 15,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}
