@@ -1,0 +1,17 @@
+{
+  "number": 102,
+  "title": "Onboard billing-worker to Vault",
+  "body": "### Service name\n\nbilling-worker\n\n### Team\n\nbilling\n\n### Kubernetes namespace\n\n_No response_\n\n### Kubernetes service account\n\nbilling-worker\n\n### Secret paths\n\nconfig\n\n### Acceptance criteria\n\nbilling-worker can read its secrets.\n",
+  "state": "OPEN",
+  "url": "https://github.com/example/vault-onboarding-line/issues/102",
+  "author": {
+    "login": "requester"
+  },
+  "operator": "operator",
+  "labels": [
+    {
+      "name": "onboard"
+    }
+  ],
+  "comments": []
+}

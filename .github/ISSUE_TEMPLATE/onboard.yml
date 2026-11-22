@@ -1,0 +1,56 @@
+name: Onboard a service to Vault
+description: Ask for a Vault policy, a Kubernetes auth role and secret paths for one service.
+title: "Onboard <service> to Vault"
+labels: ["onboard"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One issue onboards one service. The line reads these fields as they are; it never guesses a missing value.
+        The service gets read and list on `secret/teams/<team>/<service>/` and nothing else.
+  - type: input
+    id: service
+    attributes:
+      label: Service name
+      description: Lowercase letters, digits and hyphens.
+      placeholder: auth-api
+    validations:
+      required: true
+  - type: input
+    id: team
+    attributes:
+      label: Team
+      description: Lowercase letters and digits, no hyphen.
+      placeholder: identity
+    validations:
+      required: true
+  - type: input
+    id: namespace
+    attributes:
+      label: Kubernetes namespace
+      placeholder: identity
+    validations:
+      required: true
+  - type: input
+    id: service_account
+    attributes:
+      label: Kubernetes service account
+      placeholder: auth-api
+    validations:
+      required: true
+  - type: input
+    id: secret_paths
+    attributes:
+      label: Secret paths
+      description: Names under the service's own prefix, separated by commas.
+      placeholder: config, db
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What must be true when this is done.
+      placeholder: auth-api can read its config and db secrets.
+    validations:
+      required: false

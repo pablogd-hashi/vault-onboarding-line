@@ -1,0 +1,17 @@
+{
+  "number": 104,
+  "title": "Onboard ledger-api to Vault",
+  "body": "### Service name\n\nledger-api\n\n### Team\n\nfinance\n\n### Kubernetes namespace\n\nfinance\n\n### Kubernetes service account\n\nledger-api\n\n### Secret paths\n\nconfig\n\n### Acceptance criteria\n\nledger-api can read its secrets.\n",
+  "state": "OPEN",
+  "url": "https://github.com/example/vault-onboarding-line/issues/104",
+  "author": {
+    "login": "requester"
+  },
+  "operator": "operator",
+  "labels": [
+    {
+      "name": "onboard"
+    }
+  ],
+  "comments": []
+}

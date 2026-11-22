@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Merge an approved job. The only place in the repo that merges a pull request.
+
+  onboarding/bin/merge <issue>
+
+Steps: bring the branch up to date with the base, run the gate again (another
+job may have merged since the last gate), push, merge the pull request, close
+the issue. If anything is not clean, the job goes to a human instead.
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+MAIN = Path(__file__).resolve().parents[2]
+BIN = MAIN / "onboarding" / "bin"
+CONFIG = json.loads((MAIN / "onboarding" / "config.json").read_text())
+BASE = CONFIG["base"]
+
+
+def sh(cmd, cwd=None):
+    p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return p.returncode == 0, p.stdout.strip()
+
+
+def escalate(issue, reason):
+    print("ESCALATE: " + reason)
+    subprocess.run([str(BIN / "job"), "escalate", issue, reason])
+    sys.exit(1)
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: onboarding/bin/merge <issue>")
+    issue = sys.argv[1]
+    ok, out = sh([str(BIN / "job"), "show", issue])
+    if not ok:
+        sys.exit(out)
+    job = json.loads(out)
+    # `job approve` is the only way into this stage, and it checks the evidence.
+    if job["stage"] != "merging":
+        sys.exit("REFUSED: %s is in %s; only an approved job can be merged" % (job["id"], job["stage"]))
+    wt, pr = job["worktree"], str(job["pr"])
+
+    ok, state = sh(["gh", "pr", "view", pr, "--json", "state", "--jq", ".state"], cwd=MAIN)
+    if ok and state == "MERGED":  # a re-run after an interrupted merge
+        subprocess.run([str(BIN / "job"), "finish", issue])
+        return
+
+    sh(["git", "fetch", "-q", "origin", BASE], cwd=wt)
+    ok, out = sh(["git", "merge", "--no-edit", "origin/" + BASE], cwd=wt)
+    if not ok:
+        sh(["git", "merge", "--abort"], cwd=wt)
+        escalate(issue, "The branch conflicts with %s and the line does not resolve conflicts:\n\n```\n%s\n```" % (BASE, out[-1500:]))
+
+    out_dir = MAIN / "onboarding" / "jobs" / job["id"] / ("round-%d" % job["round"]) / "merge"
+    ok, out = sh([str(BIN / "gate"), "--out", str(out_dir)], cwd=wt)
+    if not ok:
+        report = (out_dir / "gate.md").read_text() if (out_dir / "gate.md").is_file() else out[-3000:]
+        escalate(issue, "The gate failed after syncing with %s:\n\n%s" % (BASE, report))
+
+    ok, out = sh(["git", "push", "origin", job["branch"]], cwd=wt)
+    if not ok:
+        escalate(issue, "Could not push the synced branch:\n\n```\n%s\n```" % out[-1500:])
+    sh(["gh", "pr", "ready", pr], cwd=MAIN)
+    ok, out = sh(["gh", "pr", "merge", pr, "--" + CONFIG["merge_method"], "--delete-branch"], cwd=MAIN)
+    if not ok:
+        escalate(issue, "GitHub refused the merge:\n\n```\n%s\n```" % out[-1500:])
+    sh(["gh", "issue", "close", issue], cwd=MAIN)  # "Closes #n" normally did this already
+    subprocess.run([str(BIN / "job"), "finish", issue])
+    print("MERGED: #%s via pull request %s" % (issue, pr))
+
+
+if __name__ == "__main__":
+    main()

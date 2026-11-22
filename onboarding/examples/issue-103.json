@@ -1,0 +1,17 @@
+{
+  "number": 103,
+  "title": "Onboard search-indexer to Vault",
+  "body": "### Service name\n\nsearch-indexer\n\n### Team\n\ndiscovery\n\n### Kubernetes namespace\n\ndiscovery\n\n### Kubernetes service account\n\nsearch-indexer\n\n### Secret paths\n\nconfig, ../../billing/billing-worker/config\n\n### Acceptance criteria\n\nsearch-indexer can read its secrets.\n",
+  "state": "OPEN",
+  "url": "https://github.com/example/vault-onboarding-line/issues/103",
+  "author": {
+    "login": "requester"
+  },
+  "operator": "operator",
+  "labels": [
+    {
+      "name": "onboard"
+    }
+  ],
+  "comments": []
+}

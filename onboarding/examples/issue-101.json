@@ -1,0 +1,17 @@
+{
+  "number": 101,
+  "title": "Onboard auth-api to Vault",
+  "body": "### Service name\n\nauth-api\n\n### Team\n\nidentity\n\n### Kubernetes namespace\n\nidentity\n\n### Kubernetes service account\n\nauth-api\n\n### Secret paths\n\nconfig, db\n\n### Acceptance criteria\n\nauth-api can read its secrets.\n",
+  "state": "OPEN",
+  "url": "https://github.com/example/vault-onboarding-line/issues/101",
+  "author": {
+    "login": "requester"
+  },
+  "operator": "operator",
+  "labels": [
+    {
+      "name": "onboard"
+    }
+  ],
+  "comments": []
+}

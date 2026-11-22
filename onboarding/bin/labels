@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Create (or update) the labels the onboarding line uses. Run once per repository.
+# An issue carries exactly one of these at a time; it shows where the job is.
+set -euo pipefail
+
+label() { gh label create "$1" --color "$2" --description "$3" --force; }
+
+label "onboard"             "0E8A16" "Queued for the onboarding line"
+label "onboard:intake"      "1D76DB" "Intake is checking the request"
+label "onboard:spec"        "5319E7" "The spec is being written"
+label "onboard:build"       "FBCA04" "Plan and Terraform are being built, or the gate is running"
+label "onboard:review"      "F9A03F" "The reviewer is reading the pull request"
+label "onboard:approve"     "0052CC" "The approver is deciding, or the merge is running"
+label "onboard:needs-info"  "D876E3" "Waiting for the author to answer a question"
+label "onboard:needs-human" "B60205" "Escalated: a person has to decide"
