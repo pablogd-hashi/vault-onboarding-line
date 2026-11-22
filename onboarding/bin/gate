@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""The gate: the only thing between an agent's branch and a merge.
+
+Run it from a job's worktree. It judges the request on that branch, but the
+judging material (this script, the policies, the module, the template) is
+always read from the main checkout, where this file lives. A branch therefore
+cannot change what judges it.
+
+  onboarding/bin/gate                     judge the branch in the current worktree
+  onboarding/bin/gate --request <id>      judge one existing request (manual use)
+  onboarding/bin/gate --out <dir>         also write gate.md and gate.log there
+
+There are no skips. A check that cannot run is a failed check.
+Every check runs, so one report shows everything that is wrong.
+"""
+import argparse
+import fcntl
+import json
+import os
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+MAIN = Path(__file__).resolve().parents[2]  # the main checkout: source of truth
+POLICIES = MAIN / "policies" / "conftest"
+TEMPLATE = MAIN / "requests" / "_template" / "03-terraform" / "main.tf"
+CONFIG = json.loads((MAIN / "onboarding" / "config.json").read_text())
+BASE = "origin/" + CONFIG["base"]
+
+# What judges a branch. In line mode these must be identical to the base branch.
+JUDGES = ["onboarding/bin", "onboarding/config.json", "policies", "terraform/modules", "requests/_template", ".claude"]
+
+REQUEST_FILES = ["01-spec/spec.md", "02-plan/plan.md", "03-terraform/main.tf"]
+
+# The only shapes a value may take. Team has no hyphen so that
+# "<team>-<service>" can be split in exactly one way.
+TEAM = r"[a-z][a-z0-9]{0,29}"
+SERVICE = r"[a-z][a-z0-9-]{0,38}[a-z0-9]"
+K8S_NAME = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+SECRET_PATH = r"[a-z0-9][a-z0-9_-]{0,39}(?:/[a-z0-9][a-z0-9_-]{0,39}){0,3}"
+
+results = []  # (check name, passed, detail)
+log = []  # full output of every command, for gate.log
+
+
+def record(name, ok, detail=""):
+    detail = " ".join(str(detail).split())  # one line per check, whatever the tool printed
+    results.append((name, bool(ok), detail))
+    print("%-34s %s  %s" % (name, "PASS" if ok else "FAIL", detail), flush=True)
+
+
+def run(cmd, cwd=None, env=None):
+    """Run a command, keep its output in the log, return (ok, output)."""
+    try:
+        p = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+        ok, out = p.returncode == 0, p.stdout
+    except (OSError, subprocess.TimeoutExpired) as e:
+        ok, out = False, str(e)
+    log.append("$ %s\n%s" % (" ".join(str(c) for c in cmd), out))
+    return ok, out
+
+
+def last_line(text):
+    """The line of a tool's output worth showing: its summary if it has one, else the last."""
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    summary = [line for line in lines if line.startswith(("Plan:", "Apply complete", "Error:", "Success!"))]
+    return (summary or lines or [""])[-1][:160]
+
+
+def check(name, fn):
+    """A check that crashes is a failed check, not a skipped one."""
+    try:
+        ok, detail = fn()
+    except Exception as e:  # noqa: BLE001 - any error must fail the gate
+        ok, detail = False, "%s: %s" % (type(e).__name__, e)
+    record(name, ok, detail)
+    return ok
+
+
+# ------------------------------------------------------------ static checks
+
+
+def check_tools():
+    missing = [t for t in ("git", "terraform", "vault", "conftest") if not shutil.which(t)]
+    return not missing, ("missing: " + ", ".join(missing)) if missing else "git terraform vault conftest"
+
+
+def check_judges_untouched():
+    """The main checkout's judging files must be exactly what the base branch has."""
+    ok, out = run(["git", "status", "--porcelain", "--"] + JUDGES, cwd=MAIN)
+    if not ok or out.strip():
+        return False, "uncommitted changes in judging files: " + last_line(out)
+    ok, out = run(["git", "diff", "--name-only", BASE, "--"] + JUDGES, cwd=MAIN)
+    if not ok or out.strip():
+        return False, "judging files differ from %s: %s" % (BASE, last_line(out))
+    return True, "same as " + BASE
+
+
+def changed_request(work):
+    """Line mode: the branch may only ADD the three files of ONE new request."""
+    ok, out = run(["git", "status", "--porcelain"], cwd=work)
+    if not ok or out.strip():
+        return None, "worktree has uncommitted changes; the gate judges commits"
+    ok, out = run(["git", "diff", "--name-status", "--no-renames", BASE + "...HEAD"], cwd=work)
+    if not ok:
+        return None, "git diff failed: " + last_line(out)
+    ids, wanted = set(), None
+    for line in out.strip().splitlines():
+        status, path = line.split("\t", 1)
+        m = re.fullmatch(r"requests/(GH-[0-9]+-%s)/(.+)" % SERVICE, path)
+        if status != "A" or not m or m.group(2) not in REQUEST_FILES:
+            return None, "not allowed: %s %s (a job may only add %s under one new requests/GH-<n>-<service>/)" % (
+                status, path, ", ".join(REQUEST_FILES))
+        ids.add(m.group(1))
+    if len(ids) != 1:
+        return None, "the branch must add exactly one request, found %d" % len(ids)
+    wanted = ids.pop()
+    return wanted, "adds only requests/%s" % wanted
+
+
+def template_pattern():
+    """Turn the template main.tf into a pattern: fixed text, five free values."""
+    pattern = re.escape(TEMPLATE.read_text())
+    one_path = '"%s"' % SECRET_PATH
+    for placeholder, value in [
+        (re.escape('"SERVICE_NAME"'), '"(?P<service>%s)"' % SERVICE),
+        (re.escape('"TEAM"'), '"(?P<team>%s)"' % TEAM),
+        (re.escape('"NAMESPACE"'), '"(?P<namespace>%s)"' % K8S_NAME),
+        (re.escape('"SERVICE_ACCOUNT"'), '"(?P<service_account>%s)"' % K8S_NAME),
+        (re.escape('["SECRET_PATHS"]'), r"\[(?P<paths>%s(?:, %s){0,19})\]" % (one_path, one_path)),
+    ]:
+        assert placeholder in pattern, "template lost placeholder " + placeholder
+        pattern = pattern.replace(placeholder, value)
+    return pattern
+
+
+def read_values(main_tf):
+    """Values of a request, or None if main.tf is not the template with values filled in.
+
+    This runs before Terraform does. Terraform on arbitrary HCL can execute
+    code (external data sources, provisioners), so only the known shape gets
+    as far as `terraform init`.
+    """
+    m = re.fullmatch(template_pattern(), main_tf.read_text())
+    if not m:
+        return None
+    values = m.groupdict()
+    values["paths"] = re.findall(r'"([^"]+)"', values["paths"])
+    return values
+
+
+def loose_team_service(main_tf):
+    """Team and service of any request folder, old or new, for the collision check."""
+    text = main_tf.read_text()
+    team = re.search(r'^\s*team\s*=\s*"([^"]*)"', text, re.M)
+    service = re.search(r'^\s*service_name\s*=\s*"([^"]*)"', text, re.M)
+    return (team.group(1), service.group(1)) if team and service else None
+
+
+def check_collision(work, request, values):
+    """One service, one request: refuse a team+service another folder already has."""
+    mine = (values["team"], values["service"])
+    clashes = set()
+    for tree in (work, MAIN):
+        for other in sorted((tree / "requests").glob("*/03-terraform/main.tf")):
+            folder = other.parts[-3]
+            if folder not in (request, "_template") and loose_team_service(other) == mine:
+                clashes.add(folder)
+    if clashes:
+        return False, "%s-%s is already onboarded by %s" % (mine[0], mine[1], ", ".join(sorted(clashes)))
+    return True, "%s-%s is new" % mine
+
+
+# ------------------------------------------------- throwaway Vault + Terraform
+
+
+class Vault:
+    """A `vault server -dev` on a free local port that lives only for this run."""
+
+    def __init__(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.addr = "http://127.0.0.1:%d" % port
+        self.root = secrets.token_hex(16)
+        # -dev-no-store-token: do not overwrite the operator's ~/.vault-token
+        self.proc = subprocess.Popen(
+            ["vault", "server", "-dev", "-dev-no-store-token", "-dev-root-token-id=" + self.root,
+             "-dev-listen-address=127.0.0.1:%d" % port],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(60):
+            if self.call("GET", "sys/health", None)[0] == 200:
+                return
+            time.sleep(0.25)
+        raise RuntimeError("throwaway Vault did not start")
+
+    def call(self, method, path, token, body=None):
+        """Return (HTTP status, parsed JSON body). Status 0 means no connection."""
+        req = urllib.request.Request(self.addr + "/v1/" + path, method=method,
+                                     data=json.dumps(body).encode() if body is not None else None)
+        if token:
+            req.add_header("X-Vault-Token", token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw, status = r.read(), r.status
+        except urllib.error.HTTPError as e:
+            raw, status = e.read(), e.code
+        except (urllib.error.URLError, OSError):
+            return 0, {}
+        try:
+            return status, json.loads(raw) if raw else {}
+        except ValueError:
+            return status, {}
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+def terraform_env(vault):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("VAULT_", "TF_VAR_"))}
+    cache = MAIN / "onboarding" / ".cache" / "plugins"
+    cache.mkdir(parents=True, exist_ok=True)
+    env.update({"TF_IN_AUTOMATION": "1", "TF_INPUT": "0", "TF_PLUGIN_CACHE_DIR": str(cache),
+                "TF_VAR_vault_addr": vault.addr, "TF_VAR_vault_token": vault.root})
+    return env
+
+
+def terraform_init(cwd, env):
+    """Parallel jobs share one provider cache; Terraform does not lock it, so we do."""
+    with open(MAIN / "onboarding" / ".cache" / "init.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return run(["terraform", "init", "-no-color", "-backend=false"], cwd=cwd, env=env)
+
+
+def denied(response):
+    """A real Vault refusal: HTTP 403 and the words 'permission denied'.
+
+    A 404, a 400 or a dropped connection is not a refusal and does not count.
+    """
+    status, body = response
+    return status == 403 and any("permission denied" in e for e in body.get("errors", []))
+
+
+def check_behaviour(vault, v):
+    """Act as the service, with a token that carries only the new policy."""
+    policy = "%s-%s" % (v["team"], v["service"])
+    own = "teams/%s/%s" % (v["team"], v["service"])
+    sibling = "teams/%s/%s-sibling/probe" % (v["team"], v["service"])
+    other_team = "teams/zz%s/%s/probe" % (v["team"], v["service"])
+
+    # Root creates the secrets the service must NOT reach, so that a refusal
+    # is "permission denied" on something that exists, not "not found".
+    for path in (sibling, other_team):
+        status, _ = vault.call("POST", "secret/data/" + path, vault.root, {"data": {"probe": "x"}})
+        record("setup: seed " + path, status == 200, "HTTP %d" % status)
+
+    status, body = vault.call("POST", "auth/token/create", vault.root,
+                              {"policies": [policy], "no_default_policy": True, "ttl": "10m"})
+    token = body.get("auth", {}).get("client_token", "")
+    carried = body.get("auth", {}).get("policies", [])
+    record("token carries only " + policy, status == 200 and carried == [policy], "policies=%s" % carried)
+
+    for path in v["paths"]:
+        status, _ = vault.call("GET", "secret/data/%s/%s" % (own, path), token)
+        record("can read %s/%s" % (own, path), status == 200, "HTTP %d" % status)
+    status, _ = vault.call("LIST", "secret/metadata/%s/" % own, token)
+    record("can list " + own, status == 200, "HTTP %d" % status)
+
+    first = "secret/data/%s/%s" % (own, v["paths"][0])
+    refusals = [
+        ("denied: write own secret", vault.call("POST", first, token, {"data": {"x": "y"}})),
+        ("denied: create new own secret", vault.call("POST", "secret/data/%s/gate-probe" % own, token, {"data": {"x": "y"}})),
+        ("denied: delete own secret", vault.call("DELETE", first, token)),
+        ("denied: delete own metadata", vault.call("DELETE", "secret/metadata/%s/%s" % (own, v["paths"][0]), token)),
+        ("denied: read sibling service", vault.call("GET", "secret/data/" + sibling, token)),
+        ("denied: read other team", vault.call("GET", "secret/data/" + other_team, token)),
+        ("denied: list own team", vault.call("LIST", "secret/metadata/teams/%s/" % v["team"], token)),
+        ("denied: sys/mounts", vault.call("GET", "sys/mounts", token)),
+        ("denied: sys/policies/acl", vault.call("LIST", "sys/policies/acl", token)),
+        ("denied: read own role", vault.call("GET", "auth/kubernetes/role/" + policy, token)),
+    ]
+    for name, response in refusals:
+        errors = "; ".join(response[1].get("errors", []))[:80]
+        record(name, denied(response), "HTTP %d %s" % (response[0], errors))
+
+    # The writes above must not have changed anything.
+    status, body = vault.call("GET", first, vault.root)
+    untouched = status == 200 and "x" not in body.get("data", {}).get("data", {})
+    record("own secret unchanged after attempts", untouched, "HTTP %d" % status)
+
+    status, body = vault.call("GET", "auth/kubernetes/role/" + policy, vault.root)
+    role = body.get("data", {})
+    record("role: one service account", role.get("bound_service_account_names") == [v["service_account"]],
+           str(role.get("bound_service_account_names")))
+    record("role: one namespace", role.get("bound_service_account_namespaces") == [v["namespace"]],
+           str(role.get("bound_service_account_namespaces")))
+    record("role: only its own policy", role.get("token_policies") == [policy], str(role.get("token_policies")))
+
+
+def judge_request(work, request, module_dir, line_mode):
+    req_dir = work / "requests" / request
+    missing = [f for f in REQUEST_FILES if not (req_dir / f).is_file()]
+    record("spec, plan and Terraform exist", not missing, ("missing: " + ", ".join(missing)) if missing else request)
+
+    ok, out = run(["terraform", "fmt", "-check", "-recursive", "-no-color", str(req_dir)])
+    record("terraform fmt", ok, last_line(out))
+
+    main_tf = req_dir / "03-terraform" / "main.tf"
+    values = read_values(main_tf) if main_tf.is_file() else None
+    record("main.tf is the template with values", values is not None,
+           "" if values else "main.tf must be requests/_template/03-terraform/main.tf with only the five values changed")
+    if values is None:
+        record("terraform and Vault checks", False, "not run: main.tf has an unknown shape, Terraform will not touch it")
+        return
+
+    if line_mode:
+        named = re.fullmatch(r"GH-[0-9]+-(.+)", request).group(1)
+        record("folder name matches service", named == values["service"], "%s vs %s" % (named, values["service"]))
+    check("no other request for this service", lambda: check_collision(work, request, values))
+
+    # Terraform runs on a copy: the request from the branch, the module from
+    # the main checkout. Nothing is written into the worktree.
+    tmp = Path(tempfile.mkdtemp(prefix="onboard-gate-"))
+    vault = None
+    try:
+        tf_dir = tmp / "requests" / request / "03-terraform"
+        tf_dir.mkdir(parents=True)
+        shutil.copy(main_tf, tf_dir / "main.tf")
+        shutil.copytree(module_dir, tmp / "terraform" / "modules" / "vault-service-onboard",
+                        ignore=shutil.ignore_patterns(".terraform", "*.tfstate*"))
+
+        vault = Vault()
+        record("throwaway Vault started", True, vault.addr)
+        status, _ = vault.call("POST", "sys/auth/kubernetes", vault.root, {"type": "kubernetes"})
+        record("setup: kubernetes auth mount", status == 204, "HTTP %d" % status)
+
+        env = terraform_env(vault)
+        ok, out = terraform_init(tf_dir, env)
+        record("terraform init", ok, last_line(out))
+        ok, out = run(["terraform", "validate", "-no-color"], cwd=tf_dir, env=env)
+        record("terraform validate", ok, last_line(out))
+        ok, out = run(["terraform", "plan", "-no-color", "-out=plan.tfplan"], cwd=tf_dir, env=env)
+        record("terraform plan", ok, last_line(out))
+
+        ok, plan_json = run(["terraform", "show", "-json", "plan.tfplan"], cwd=tf_dir, env=env)
+        log.pop()  # the plan JSON is large and not useful in the log
+        (tf_dir / "plan.json").write_text(plan_json if ok else "{}")
+        ok, out = run(["conftest", "test", "--no-color", "-p", str(POLICIES), str(tf_dir / "plan.json")])
+        failures = [line.split(" - main - ")[-1] for line in out.splitlines() if line.startswith("FAIL")]
+        record("conftest on the plan", ok, "; ".join(failures)[:300] if failures else last_line(out))
+
+        ok, out = run(["terraform", "apply", "-no-color", "plan.tfplan"], cwd=tf_dir, env=env)
+        record("apply to throwaway Vault", ok, last_line(out))
+        if ok:
+            check_behaviour(vault, values)
+        else:
+            record("behaviour as the service", False, "not run: apply failed")
+    except Exception as e:  # noqa: BLE001
+        record("terraform and Vault checks", False, "%s: %s" % (type(e).__name__, e))
+    finally:
+        if vault:
+            vault.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_module_tests(module_dir):
+    tmp = Path(tempfile.mkdtemp(prefix="onboard-gate-mod-"))
+    try:
+        mod = tmp / "module"
+        shutil.copytree(module_dir, mod, ignore=shutil.ignore_patterns(".terraform", "*.tfstate*"))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("VAULT_", "TF_VAR_"))}
+        cache = MAIN / "onboarding" / ".cache" / "plugins"
+        cache.mkdir(parents=True, exist_ok=True)
+        env.update({"TF_IN_AUTOMATION": "1", "TF_PLUGIN_CACHE_DIR": str(cache)})
+        ok, out = terraform_init(mod, env)
+        if not ok:
+            return False, "init: " + last_line(out)
+        ok, out = run(["terraform", "test", "-no-color"], cwd=mod, env=env)
+        return ok, last_line(out)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Judge an onboarding request. No skips.")
+    ap.add_argument("--request", help="judge this one request folder instead of the branch diff (manual use)")
+    ap.add_argument("--module-dir", help="use another copy of the module (only to prove the gate rejects a bad one)")
+    ap.add_argument("--out", help="directory to write gate.md and gate.log into")
+    args = ap.parse_args()
+
+    line_mode = not args.request and not args.module_dir
+    module_dir = Path(args.module_dir).resolve() if args.module_dir else MAIN / "terraform" / "modules" / "vault-service-onboard"
+    ok, top = run(["git", "rev-parse", "--show-toplevel"])
+    work = Path(top.strip()) if ok else Path.cwd()
+    ok, sha = run(["git", "rev-parse", "HEAD"], cwd=work)
+    commit = sha.strip() if ok else "unknown"
+
+    print("gate: judging %s at %s\n      judges read from %s\n" % (work, commit[:12], MAIN))
+    if check("tools installed", check_tools):
+        request = args.request
+        if line_mode:
+            check("judging files untouched", check_judges_untouched)
+            request, detail = changed_request(work)
+            record("branch only adds one request", request is not None, detail)
+        check("policy unit tests", lambda: (lambda r: (r[0], last_line(r[1])))(
+            run(["conftest", "verify", "--no-color", "-p", str(POLICIES)])))
+        check("module terraform test", lambda: check_module_tests(module_dir))
+        if request:
+            judge_request(work, request, module_dir, line_mode)
+
+    passed = bool(results) and all(ok for _, ok, _ in results)
+    failed = [name for name, ok, _ in results if not ok]
+    verdict = "GATE: PASS (%d checks)" % len(results) if passed else "GATE: FAIL (%d of %d failed: %s)" % (
+        len(failed), len(results), "; ".join(failed))
+    print("\n" + verdict)
+
+    if args.out:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "gate.log").write_text("\n".join(log))
+        rows = "\n".join("| %s | %s | %s |" % (n, "PASS" if ok else "**FAIL**", d.replace("|", "/")) for n, ok, d in results)
+        (out / "gate.md").write_text("%s\nCOMMIT: %s\n\n| Check | Result | Detail |\n|---|---|---|\n%s\n" % (verdict, commit, rows))
+    sys.exit(0 if passed else 1)
+
+
+if __name__ == "__main__":
+    main()

@@ -34,7 +34,7 @@ module "service_onboard" {
   team                 = "TEAM"
   namespace            = "NAMESPACE"
   service_account      = "SERVICE_ACCOUNT"
-  secret_paths         = ["config", "db"]
+  secret_paths         = ["SECRET_PATHS"]
   kubernetes_auth_path = "kubernetes"
   kv_mount_path        = "secret"
 }

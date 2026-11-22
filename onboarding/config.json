@@ -1,0 +1,6 @@
+{
+  "base": "main",
+  "concurrency": 3,
+  "max_rounds": 3,
+  "merge_method": "squash"
+}
