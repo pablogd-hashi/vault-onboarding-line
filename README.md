@@ -1,6 +1,6 @@
 # vault-onboarding-line
 
-A GitHub issue asking to onboard a service to Vault goes in. A merged pull request with the spec, the plan and the Terraform comes out. No person approves anything in between. A person is involved only when the line asks a question or escalates.
+A GitHub issue asking to onboard a service to Vault goes in. A merged pull request with the spec, the plan and the Terraform comes out. No person approves anything in between. A person is involved when the line asks a question or escalates, and for the last step: the line shows what it built, and a person applies it to Vault.
 
 It runs in Claude Code. One skill orchestrates. Five agents each do one role. Scripts do everything that must give the same result every time.
 
@@ -20,8 +20,13 @@ gate (script) ─FAIL┤
 reviewer ─CHANGES──┘        at most 3 rounds, then a person
       │ PASS
 approver ── APPROVE  → merge script: sync with main, gate again, merge
-         └─ ESCALATE → PR ready for you, issue labelled onboard:needs-human
+      │  └─ ESCALATE → PR ready for you, issue labelled onboard:needs-human
+      │ merged
+ready to apply → you run onboarding/bin/apply: it shows the policy, the role
+                 and the plan, asks, applies, and checks the Vault
 ```
+
+![The board with one merged job waiting for a person to apply it](docs/img/board-ready-to-apply.png)
 
 ## What you need
 
@@ -55,11 +60,13 @@ File a request with the "Onboard a service to Vault" issue form. Then, in Claude
 
 On GitHub, the issue has one stage label at a time:
 
-`onboard` → `onboard:intake` → `onboard:spec` → `onboard:build` → `onboard:review` → `onboard:approve`
+`onboard` → `onboard:intake` → `onboard:spec` → `onboard:build` → `onboard:review` → `onboard:approve` → `onboard:ready-to-apply`
 
-The issue closes when the pull request merges. The side exits are `onboard:needs-info` and `onboard:needs-human`. Every step leaves a comment. Intake's decision is on the issue. Each gate report, the review and the approver's decision are on the pull request.
+The issue closes when a person has applied the request. The side exits are `onboard:needs-info` and `onboard:needs-human`. Every step leaves a comment. Intake's decision is on the issue. Each gate report, the review and the approver's decision are on the pull request.
 
 On the board, there is one card per job, in the lane of its stage. A card shows the gate and review result of every round, the risk, the minutes elapsed and a dot while the job runs. Click a card to read every step.
+
+![The gate report of a job, opened from its card](docs/img/step-gate.png)
 
 ## Agents
 
@@ -80,6 +87,7 @@ Builder and reviewer run on different models. Each agent replies with one line. 
 | `onboarding/bin/job` | The only writer of job state. It refuses illegal moves, a fourth parallel job and moves without evidence. It moves the labels and posts the comments. |
 | `onboarding/bin/gate` | Judges a branch. |
 | `onboarding/bin/merge` | Syncs with main, runs the gate again and merges. Nothing else merges. |
+| `onboarding/bin/apply` | Run by a person. Shows what a merged request will write to Vault, asks, applies and checks the result. |
 | `onboarding/bin/labels` | Creates the labels. |
 
 ## The gate
@@ -111,6 +119,18 @@ python3 .claude/hooks/guard_test.py
 
 The first runs the whole gate on the example request. The second runs the policy unit tests. The third tests every denial of the hook.
 
+## Apply
+
+The line stops at the merge. Nothing is in Vault yet. A person runs:
+
+```bash
+onboarding/bin/apply 12
+```
+
+The script plans the request against the Vault on 127.0.0.1. It shows the policy in full, the role, the secret paths and the Terraform plan line. It applies only after you type `yes`, and it applies the plan it showed. Then it checks the Vault: a token with only the new policy reads its own paths and gets HTTP 403 on a write, on another team's path and on `sys/`.
+
+The script refuses any Vault that is not on 127.0.0.1. For a shared Vault, the same step belongs in a pipeline with an approval. [docs/examples/apply-shared-vault.yml](docs/examples/apply-shared-vault.yml) shows the shape. It is an example and has not been run.
+
 ## Rules
 
 The rules are in [CLAUDE.md](CLAUDE.md). A hook, [.claude/hooks/guard.py](.claude/hooks/guard.py), enforces the ones a shell command could break:
@@ -120,6 +140,7 @@ The rules are in [CLAUDE.md](CLAUDE.md). A hook, [.claude/hooks/guard.py](.claud
 - no force push
 - no `terraform apply` or Vault write to anything but 127.0.0.1
 - no agent edits to the gate
+- no apply by an agent or a session
 
 ## Layout
 
@@ -129,7 +150,7 @@ requests/_template/            the shapes they must follow
 terraform/modules/vault-service-onboard/   the only module a request may call
 terraform/platform/            the Kubernetes auth mount
 policies/conftest/             what a plan may contain, with unit tests
-onboarding/bin/                job, gate, merge, labels
+onboarding/bin/                job, gate, merge, apply, labels
 onboarding/board/              the local board
 .claude/                       agents, the /onboard skill, the guard hook
 docs/                          how to run it, architecture, decisions

@@ -19,7 +19,7 @@ PAGE = Path(__file__).with_name("index.html")
 
 JOB_ID = re.compile(r"GH-[0-9]+-[a-z0-9-]+")
 # The only files the page may ask for. Nothing else on disk is reachable.
-STEP_FILE = re.compile(r"(issue|intake|build|decision|feedback-[0-9]+)\.md|round-[0-9]+/(gate|review)\.md|round-[0-9]+/merge/gate\.md")
+STEP_FILE = re.compile(r"(issue|intake|build|decision|apply|feedback-[0-9]+)\.md|round-[0-9]+/(gate|review)\.md|round-[0-9]+/merge/gate\.md")
 
 
 def steps(job):
@@ -33,8 +33,7 @@ def steps(job):
     for rnd in sorted(folder.glob("round-*"), key=lambda p: int(p.name.split("-")[1])):
         found += ["%s/%s" % (rnd.name, f) for f in ("gate.md", "review.md", "merge/gate.md") if (rnd / f).is_file()]
     found += sorted(p.name for p in folder.glob("feedback-*.md"))
-    if (folder / "decision.md").is_file():
-        found.append("decision.md")
+    found += [name for name in ("decision.md", "apply.md") if (folder / name).is_file()]
     return found
 
 

@@ -2,5 +2,6 @@
   "base": "main",
   "concurrency": 3,
   "max_rounds": 3,
-  "merge_method": "squash"
+  "merge_method": "squash",
+  "apply_to": "http://127.0.0.1:8200"
 }

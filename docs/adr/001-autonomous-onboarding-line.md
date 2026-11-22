@@ -25,10 +25,12 @@ The approvals were the only real check. I wanted the opposite: no approvals, and
 5. A job may only add one request folder. Anything else is rejected at intake.
 6. The shell rules are enforced by a hook, not by instructions.
 7. The spec stays the centre. R1 to R5 are copied from the issue. The builder builds from the spec only. The reviewer checks the issue, the spec, the plan and the Terraform against each other.
+8. A person applies. The line stops at the merge. The apply script shows the policy, the role and the plan, and applies after a person types yes. Agents and sessions cannot run it. It then checks the result on the Vault.
 
 ## Consequences
 
-- A person sees a job only when intake asks a question, when the approver escalates, or when three rounds are used.
+- A person sees a job when intake asks a question, when the approver escalates, when three rounds are used, and at the apply.
+- Nothing reaches Vault without a person. The cost is one command per request.
 - The line is narrow. It cannot change the module or the policies, so it cannot widen what it is allowed to produce.
 - The gate, the policies and the hook are now the critical code. Only people change them, in their own pull requests.
 - The gate needs `terraform`, `vault` and `conftest` installed locally. There is no reduced mode.
@@ -40,6 +42,8 @@ The approvals were the only real check. I wanted the opposite: no approvals, and
 - Static policy checks only. A plan can look right and still grant more than intended. Testing against a real Vault takes about 10 seconds.
 - Let a job change the module when a request needs it. A branch could then change what it is judged against. Module changes stay with people.
 - A workflow engine or an agent framework. A few scripts in standard-library Python and one skill are easier to read and to audit.
+
+- Apply automatically after the merge. Then nobody looks at what is written to Vault. One decision by a person, with the policy and the plan in front of them, is cheap and is what most organisations require for a change to access.
 
 ## Credit
 

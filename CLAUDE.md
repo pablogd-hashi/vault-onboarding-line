@@ -1,6 +1,6 @@
 # vault-onboarding-line
 
-A GitHub issue asking to onboard a service to Vault goes in. A merged pull request with the spec, the plan and the Terraform comes out. People are involved only when the line asks a question or escalates.
+A GitHub issue asking to onboard a service to Vault goes in. A merged pull request with the spec, the plan and the Terraform comes out. People are involved when the line asks a question or escalates, and for the last step: a person applies the merged request to Vault.
 
 Run it with the `/onboard` skill. Scripts in `onboarding/bin/` own everything deterministic: job state (`job`), the gate (`gate`), the merge (`merge`). Agents in `.claude/agents/` each do one role. `.claude/hooks/guard.py` enforces the shell rules below.
 
@@ -14,8 +14,9 @@ Run it with the `/onboard` skill. Scripts in `onboarding/bin/` own everything de
 6. **One service, one request.** A team and service that already have a folder under `requests/` are not onboarded again.
 7. **A job only adds one folder.** `requests/GH-<issue>-<service>/` with `01-spec/spec.md`, `02-plan/plan.md`, `03-terraform/main.tf`. A request that needs a change to the module, the platform layer, the policies or the line itself is rejected at intake and done by a person.
 8. **Agents never merge.** Only `onboarding/bin/merge` merges, after the approver and a fresh gate. Agents push only their own `onboard/<id>` branch and never force push.
-9. **Local Vault only.** The gate applies to a throwaway `vault server -dev` it starts itself. Nothing in this repo applies to a Vault that is not on 127.0.0.1.
-10. **The gate decides.** Nobody edits the gate, the policies, the module, the template or the hook to make a job pass. If the gate is wrong, a person fixes the gate in its own pull request.
+9. **A person applies.** `onboarding/bin/apply` shows the policy, the role and the plan, and applies after a person types yes. Agents and sessions never run it. The hook refuses it.
+10. **Local Vault only.** The gate applies to a throwaway `vault server -dev` it starts itself. The apply script targets `apply_to` in `onboarding/config.json`, which must be on 127.0.0.1. Nothing in this repo applies to another Vault.
+11. **The gate decides.** Nobody edits the gate, the policies, the module, the template or the hook to make a job pass. If the gate is wrong, a person fixes the gate in its own pull request.
 
 ## Layout
 
@@ -25,7 +26,7 @@ requests/_template/                            the shapes spec, plan and main.tf
 terraform/modules/vault-service-onboard/       the only module a request may call
 terraform/platform/                            the Kubernetes auth mount (applied by a person)
 policies/conftest/                             what a plan may contain, with unit tests
-onboarding/bin/                                job, gate, merge, labels
+onboarding/bin/                                job, gate, merge, apply, labels
 onboarding/board/                              the local board
 onboarding/jobs/<id>/                          per-job state and agent files (not in git)
 .worktrees/<id>/                               one git worktree per job (not in git)

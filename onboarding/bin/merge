@@ -4,8 +4,9 @@
   onboarding/bin/merge <issue>
 
 Steps: bring the branch up to date with the base, run the gate again (another
-job may have merged since the last gate), push, merge the pull request, close
-the issue. If anything is not clean, the job goes to a human instead.
+job may have merged since the last gate), push, merge the pull request.
+If anything is not clean, the job goes to a human instead. A merged job is
+not applied: a person does that with onboarding/bin/apply.
 """
 import json
 import subprocess
@@ -66,7 +67,6 @@ def main():
     ok, out = sh(["gh", "pr", "merge", pr, "--" + CONFIG["merge_method"], "--delete-branch"], cwd=MAIN)
     if not ok:
         escalate(issue, "GitHub refused the merge:\n\n```\n%s\n```" % out[-1500:])
-    sh(["gh", "issue", "close", issue], cwd=MAIN)  # "Closes #n" normally did this already
     subprocess.run([str(BIN / "job"), "finish", issue])
     print("MERGED: #%s via pull request %s" % (issue, pr))
 

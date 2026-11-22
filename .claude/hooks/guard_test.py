@@ -44,6 +44,13 @@ CASES = [
     (DENY, "merge through the API", bash("gh api -X PUT repos/o/r/pulls/12/merge")),
     (ALLOW, "open a draft PR", bash("gh pr create --draft --base main --head onboard/GH-1-demo --title t --body 'Closes #1'")),
     (ALLOW, "comment on a PR", bash("gh pr comment 12 --body-file x.md")),
+    # --- applying
+    (DENY, "apply a merged job", bash("onboarding/bin/apply 12")),
+    (DENY, "apply everything, by an agent", bash("cd /repo && onboarding/bin/apply --all", **AGENT)),
+    (DENY, "apply through a fake terminal", bash("script -q /dev/null onboarding/bin/apply 12")),
+    (DENY, "record a job as applied", bash("onboarding/bin/job applied 12")),
+    (ALLOW, "read the apply help", bash("onboarding/bin/apply --help")),
+    (ALLOW, "show a job", bash("onboarding/bin/job show 12")),
     # --- pushing
     (ALLOW, "push own onboard branch", bash("git push origin onboard/GH-1-demo")),
     (ALLOW, "push -u HEAD on an onboard branch", bash("git push -u origin HEAD")),

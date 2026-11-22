@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Apply a merged request to Vault. Run by a person, never by an agent.
+
+  onboarding/bin/apply <issue>     plan one merged job, show it, ask, apply, check
+  onboarding/bin/apply --all       the same for every request on main (rebuilds a dev Vault)
+
+The line stops at the merge. This is the last step, and it is a person's:
+the script shows what will be written to Vault and applies only after "yes".
+It applies the plan it showed, then checks the result on the Vault itself.
+
+The target is `apply_to` in onboarding/config.json, or ONBOARD_APPLY_TO, and
+must be on 127.0.0.1.
+The token comes from VAULT_TOKEN, or is "root" for a dev Vault.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from urllib.parse import urlparse
+
+MAIN = Path(__file__).resolve().parents[2]
+BIN = MAIN / "onboarding" / "bin"
+CONFIG = json.loads((MAIN / "onboarding" / "config.json").read_text())
+BASE = CONFIG["base"]
+ADDR = os.environ.get("ONBOARD_APPLY_TO", CONFIG["apply_to"]).rstrip("/")
+TOKEN = os.environ.get("VAULT_TOKEN", "root")
+# Terraform runs on a copy, so state and lock files never show up in the checkout.
+WORK = MAIN / "onboarding" / ".cache" / "apply"
+
+
+def stop(message):
+    print("REFUSED: " + message, file=sys.stderr)
+    sys.exit(1)
+
+
+def sh(cmd, cwd=None, env=None):
+    p = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return p.returncode == 0, p.stdout.strip()
+
+
+def vault(method, path, token=TOKEN, data=None):
+    """One call to the Vault HTTP API. Returns (status, parsed body)."""
+    req = urllib.request.Request(ADDR + "/v1/" + path, method=method, headers={"X-Vault-Token": token},
+                                 data=json.dumps(data).encode() if data is not None else None)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {}
+    except (urllib.error.URLError, OSError):
+        return 0, {}
+
+
+def refused(response):
+    """A real denial: HTTP 403 and Vault's own words, not just any error."""
+    status, body = response
+    return status == 403 and "permission denied" in " ".join(body.get("errors", []))
+
+
+def terraform_env():
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TF_VAR_")}
+    cache = MAIN / "onboarding" / ".cache" / "plugins"
+    cache.mkdir(parents=True, exist_ok=True)
+    env.update({"TF_IN_AUTOMATION": "1", "TF_INPUT": "0", "TF_PLUGIN_CACHE_DIR": str(cache),
+                "TF_VAR_vault_addr": ADDR, "TF_VAR_vault_token": TOKEN})
+    return env
+
+
+def copy_in(relative):
+    """Refresh the working copy of one folder from the checkout, keeping its Terraform state."""
+    src, dst = MAIN / relative, WORK / relative
+    dst.mkdir(parents=True, exist_ok=True)
+    for old in dst.glob("*.tf"):
+        old.unlink()
+    for item in src.iterdir():
+        if item.is_file():
+            shutil.copy2(item, dst / item.name)
+        elif item.name != ".terraform":
+            shutil.copytree(item, dst / item.name, dirs_exist_ok=True)
+    return dst
+
+
+def plan(relative):
+    """terraform init and plan in the working copy. Returns (folder, plan as JSON, summary line)."""
+    cwd, env = copy_in(relative), terraform_env()
+    ok, out = sh(["terraform", "init", "-no-color"], cwd=cwd, env=env)
+    if not ok:
+        stop("terraform init failed in %s:\n%s" % (relative, out[-1500:]))
+    ok, out = sh(["terraform", "plan", "-no-color", "-out=apply.tfplan"], cwd=cwd, env=env)
+    if not ok:
+        stop("terraform plan failed in %s:\n%s" % (relative, out[-1500:]))
+    summary = next((line for line in out.splitlines() if line.startswith(("Plan:", "No changes"))), "")
+    ok, shown = sh(["terraform", "show", "-json", "apply.tfplan"], cwd=cwd, env=env)
+    return cwd, json.loads(shown) if ok else {}, summary
+
+
+def planned(plan_json, kind):
+    return [c["change"]["after"] for c in plan_json.get("resource_changes", []) if c["type"] == kind and c["change"].get("after")]
+
+
+def describe(request, plan_json, summary):
+    """What a person needs to see before saying yes."""
+    lines = ["", "== %s ==" % request, ""]
+    for policy in planned(plan_json, "vault_policy"):
+        lines += ["Policy `%s`:" % policy["name"], "", "```hcl", policy["policy"].strip(), "```", ""]
+    for role in planned(plan_json, "vault_kubernetes_auth_backend_role"):
+        lines += ["Role `%s` on auth mount `%s`:" % (role["role_name"], role["backend"]), "",
+                  "- service accounts: %s" % ", ".join(role["bound_service_account_names"]),
+                  "- namespaces: %s" % ", ".join(role["bound_service_account_namespaces"]),
+                  "- policies: %s" % ", ".join(role["token_policies"]), ""]
+    secrets = ["%s/%s" % (s["mount"], s["name"]) for s in planned(plan_json, "vault_kv_secret_v2")]
+    if secrets:
+        lines += ["Secret paths created with placeholder values:", ""] + ["- %s" % s for s in secrets] + [""]
+    lines += ["Terraform: %s" % (summary or "(no summary)"), ""]
+    return "\n".join(lines)
+
+
+def check_result(plan_json):
+    """Ask the Vault what it has now. Returns a list of (check, passed, detail)."""
+    results = []
+    for policy in planned(plan_json, "vault_policy"):
+        name = policy["name"]
+        status, body = vault("GET", "sys/policies/acl/" + name)
+        same = status == 200 and body.get("data", {}).get("policy", "").strip() == policy["policy"].strip()
+        results.append(("policy %s is the planned text" % name, same, "HTTP %s" % status))
+        # Act as the service: a token that carries only this policy.
+        status, body = vault("POST", "auth/token/create", data={"policies": [name], "no_default_policy": True, "ttl": "5m"})
+        token = body.get("auth", {}).get("client_token", "")
+        results.append(("token with only %s" % name, bool(token), "HTTP %s" % status))
+        for secret in planned(plan_json, "vault_kv_secret_v2"):
+            path = "%s/data/%s" % (secret["mount"], secret["name"])
+            status, _ = vault("GET", path, token)
+            results.append(("can read %s" % path, status == 200, "HTTP %s" % status))
+            response = vault("POST", path, token, {"data": {"x": "y"}})
+            results.append(("denied: write %s" % path, refused(response), "HTTP %s" % response[0]))
+        for path in ("secret/data/teams/zz-not-this-team/zz-service/config", "sys/mounts", "sys/policies/acl/" + name):
+            response = vault("GET", path, token)
+            results.append(("denied: read %s" % path, refused(response), "HTTP %s" % response[0]))
+        vault("POST", "auth/token/revoke", data={"token": token})
+    for role in planned(plan_json, "vault_kubernetes_auth_backend_role"):
+        status, body = vault("GET", "auth/%s/role/%s" % (role["backend"], role["role_name"]))
+        data = body.get("data", {})
+        ok = (status == 200 and data.get("bound_service_account_names") == role["bound_service_account_names"]
+              and data.get("bound_service_account_namespaces") == role["bound_service_account_namespaces"]
+              and data.get("token_policies") == role["token_policies"])
+        results.append(("role %s is as planned" % role["role_name"], ok, "HTTP %s" % status))
+    return results
+
+
+def ask(question):
+    """Only the word yes, typed by a person, goes on."""
+    try:
+        answer = input(question).strip()
+    except EOFError:
+        answer = ""
+    if answer != "yes":
+        stop("nothing applied.")
+
+
+def preflight():
+    if urlparse(ADDR).hostname not in ("127.0.0.1", "localhost", "::1"):
+        stop("apply_to is %s. This script applies only to a Vault on 127.0.0.1." % ADDR)
+    if not sys.stdin.isatty():
+        stop("this step is a person's. Run it yourself in a terminal.")
+    status, body = vault("GET", "sys/auth")
+    if status == 0:
+        stop("no Vault at %s. Start one: vault server -dev -dev-root-token-id=root" % ADDR)
+    if status != 200:
+        stop("Vault at %s refused the token (HTTP %s). Set VAULT_TOKEN." % (ADDR, status))
+    sh(["git", "fetch", "-q", "origin", BASE], cwd=MAIN)
+    return "kubernetes/" in body.get("data", body)
+
+
+def on_main(request):
+    """The request must be the merged one: in the checkout and identical to origin's."""
+    folder = MAIN / "requests" / request / "03-terraform"
+    ok, _ = sh(["git", "diff", "--quiet", "origin/" + BASE, "--", "requests/" + request], cwd=MAIN)
+    ok2, tracked = sh(["git", "ls-tree", "-r", "--name-only", "origin/" + BASE, "requests/" + request], cwd=MAIN)
+    if not (folder.is_dir() and ok and ok2 and tracked):
+        stop("requests/%s is not in this checkout as merged on origin/%s. Run: git pull" % (request, BASE))
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) != 1 or args[0] in ("-h", "--help"):
+        sys.exit(__doc__)
+    has_mount = preflight()
+
+    job = None
+    if args[0] == "--all":
+        requests = sorted(p.name for p in (MAIN / "requests").iterdir() if p.is_dir() and p.name != "_template")
+    else:
+        ok, out = sh([str(BIN / "job"), "show", args[0]])
+        if not ok:
+            stop(out)
+        job = json.loads(out)
+        if job["stage"] not in ("ready-to-apply", "merged"):
+            stop("%s is in %s; only a merged job can be applied" % (job["id"], job["stage"]))
+        requests = [job["id"]]
+    for request in requests:
+        on_main(request)
+
+    print("Target Vault: %s" % ADDR)
+    copy_in("terraform/modules")
+    todo = []
+    if not has_mount:
+        print("\nThe Kubernetes auth mount is missing. The platform layer is applied first (once per Vault).")
+        cwd, _, summary = plan("terraform/platform")
+        print("Terraform: %s" % summary)
+        ask("\nCreate the auth mount on %s? Type yes: " % ADDR)
+        ok, out = sh(["terraform", "apply", "-no-color", "apply.tfplan"], cwd=cwd, env=terraform_env())
+        if not ok:
+            stop("the platform layer did not apply:\n" + out[-1500:])
+        print("Auth mount created.")
+    text = ""
+    for request in requests:
+        cwd, plan_json, summary = plan("requests/%s/03-terraform" % request)
+        todo.append((request, cwd, plan_json))
+        text += describe(request, plan_json, summary)
+    print(text)
+
+    ask("Apply this to %s? Type yes: " % ADDR)
+
+    failed, report = False, ""
+    for request, cwd, plan_json in todo:
+        # The plan file that was shown is the one that runs.
+        ok, out = sh(["terraform", "apply", "-no-color", "apply.tfplan"], cwd=cwd, env=terraform_env())
+        results = [("terraform apply", ok, next((l for l in out.splitlines() if l.startswith(("Apply complete", "Error"))), out[-120:]))]
+        if ok:
+            results += check_result(plan_json)
+        report += "\n== %s ==\n\n| Check | Result | Detail |\n|---|---|---|\n" % request
+        for name, passed, detail in results:
+            report += "| %s | %s | %s |\n" % (name, "PASS" if passed else "FAIL", re.sub(r"\s+", " ", detail))
+            failed = failed or not passed
+    verdict = "APPLY: FAIL" if failed else "APPLY: PASS"
+    print(report + "\n" + verdict)
+
+    if job:
+        who = sh(["git", "config", "user.name"], cwd=MAIN)[1] or "a person"
+        body = "%s\nTARGET: %s\nBY: %s\n\nApplied by %s to `%s`.\n%s\nWhat was applied:\n%s" % (verdict, ADDR, who, who, ADDR, report, text)
+        (MAIN / "onboarding" / "jobs" / job["id"] / "apply.md").write_text(body)
+        if not failed:
+            subprocess.run([str(BIN / "job"), "applied", str(job["issue"])])
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

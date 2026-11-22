@@ -12,7 +12,8 @@ one place that changes GitHub labels and posts the line's comments.
   job gate <issue>        check the build, run the gate, record the result
   job review <issue>      act on round-N/review.md
   job approve <issue>     act on decision.md: APPROVE or ESCALATE
-  job finish <issue>      PR is merged: close out (called by onboarding/bin/merge)
+  job finish <issue>      PR is merged: ready to apply (called by onboarding/bin/merge)
+  job applied <issue>     a person applied it: close out (called by onboarding/bin/apply)
   job escalate <issue> <reason>   hand the job to a human
   job resume <issue>      needs-info answered: back to intake
   job feedback <issue>    human feedback on stdin: needs-human back to build
@@ -52,16 +53,19 @@ MOVES = {
     "gate": {"review", "build", "needs-human"},
     "review": {"approve", "build", "needs-human"},
     "approve": {"merging", "needs-human"},
-    "merging": {"merged", "needs-human"},
-    "needs-human": {"build", "merged", "rejected"},
+    "merging": {"ready-to-apply", "needs-human"},
+    "needs-human": {"build", "ready-to-apply", "rejected"},
+    "ready-to-apply": {"applied"},
+    "merged": {"applied"},  # jobs that merged before the apply stage existed
     "rejected": set(),
-    "merged": set(),
+    "applied": set(),
 }
 RUNNING = {"intake", "spec", "build", "gate", "review", "approve", "merging"}  # these hold a slot
 LABEL = {
     "intake": "onboard:intake", "spec": "onboard:spec", "build": "onboard:build", "gate": "onboard:build",
     "review": "onboard:review", "approve": "onboard:approve", "merging": "onboard:approve",
     "needs-info": "onboard:needs-info", "needs-human": "onboard:needs-human",
+    "ready-to-apply": "onboard:ready-to-apply", "merged": "onboard:ready-to-apply",
 }
 ALL_LABELS = ["onboard"] + sorted(set(LABEL.values()))
 
@@ -165,7 +169,7 @@ def move(job, to, note=""):
     if to in RUNNING and frm not in RUNNING and free_slots(excluding=job["id"]) < 1:
         die("%d jobs are already running; %s must wait for a free slot" % (CONFIG["concurrency"], job["id"]))
     job["stage"], job["note"] = to, note
-    if to in ("merged", "rejected", "needs-info", "needs-human"):
+    if to in ("applied", "rejected", "needs-info", "needs-human", "ready-to-apply"):
         job["ended"] = now()
     else:
         job.pop("ended", None)
@@ -409,12 +413,33 @@ def cmd_approve(number):
 
 
 def cmd_finish(number):
+    """The pull request is merged. The line stops here: a person applies."""
     job = load(number)
-    move(job, "merged", "merged")
+    # "Closes #n" closed the issue at the merge. It stays open until the service is in Vault.
+    if not OFFLINE:
+        sh(["gh", "issue", "reopen", str(number)], cwd=MAIN)
+    move(job, "ready-to-apply", "merged, waiting for a person to apply")
     if job.get("worktree") and Path(job["worktree"]).is_dir():
         sh(["git", "worktree", "remove", "--force", job["worktree"]], cwd=MAIN)
         sh(["git", "branch", "-D", job["branch"]], cwd=MAIN)
-    print("NEXT: nothing. #%s is merged." % number)
+    comment(job, "issue", "Merged, ready to apply",
+            "Pull request #%s is merged. Nothing is in Vault yet.\n\n"
+            "A person applies it from the main checkout:\n\n```\ngit pull\nonboarding/bin/apply %s\n```\n\n"
+            "The script shows the policy, the role and the Terraform plan, and asks before it applies."
+            % (job.get("pr"), number))
+    print("NEXT: nothing. #%s is merged and waits for a person to run onboarding/bin/apply %s." % (number, number))
+
+
+def cmd_applied(number):
+    """Called by onboarding/bin/apply after the apply and its checks passed."""
+    job = load(number)
+    report = folder(job) / "apply.md"
+    if not first_line(report).startswith("APPLY: PASS"):
+        die("apply.md must start with `APPLY: PASS`, found %r" % first_line(report))
+    comment(job, "issue", "Applied", body_after_first_line(report))
+    move(job, "applied", "applied")
+    gh("issue", "close", str(number))
+    print("NEXT: nothing. #%s is applied and closed." % number)
 
 
 def cmd_escalate(number, reason):
@@ -470,6 +495,8 @@ def cmd_queue():
                     slots -= 1 if slots > 0 else 0
                     continue
             print("wait    #%s  %s  stage=%s (%s)" % (job["issue"], job["id"], job["stage"], job.get("note", "")))
+        elif job["stage"] in ("ready-to-apply", "merged"):
+            print("apply   #%s  %s  a person runs: onboarding/bin/apply %s" % (job["issue"], job["id"], job["issue"]))
     if not OFFLINE:
         known = {str(j["issue"]) for j in jobs}
         for issue in json.loads(gh("issue", "list", "--label", "onboard", "--state", "open", "--json", "number,title")):
@@ -498,7 +525,7 @@ def main():
             cmd_resume(rest[0], from_file)
         elif cmd == "escalate":
             cmd_escalate(rest[0], " ".join(rest[1:]) or "Escalated by the orchestrator.")
-        elif cmd in ("intake", "spec", "review", "approve", "finish", "feedback"):
+        elif cmd in ("intake", "spec", "review", "approve", "finish", "applied", "feedback"):
             globals()["cmd_" + cmd](rest[0])
         elif cmd == "queue":
             cmd_queue()

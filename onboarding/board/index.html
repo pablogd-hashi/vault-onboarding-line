@@ -26,7 +26,7 @@
   @keyframes blink { 50% { opacity: .3; } }
   @media (prefers-reduced-motion: reduce) { .lamp.live, .beat { animation: none; } }
 
-  main { display: grid; grid-template-columns: repeat(7, minmax(165px, 1fr)); gap: 14px; padding: 0 24px 24px; overflow-x: auto; }
+  main { display: grid; grid-template-columns: repeat(8, minmax(150px, 1fr)); gap: 12px; padding: 0 24px 24px; overflow-x: auto; }
   .lane { min-height: 62vh; }
   /* A lane heading is underlined; the line turns blue when the lane has jobs. */
   .lane h2 { display: flex; justify-content: space-between; margin: 0 0 10px; padding: 0 0 7px; font-size: 13px; font-weight: 600;
@@ -50,6 +50,7 @@
   .mark.fail { background: var(--fail-bg); color: var(--fail); border-color: transparent; }
   .mark.now { border-color: var(--blue); color: var(--blue); }
   .note { font-size: 12px; color: var(--wait); margin-top: 6px; }
+  .applied-note { font-size: 12px; color: var(--pass); margin-top: 6px; }
   .meta { margin-top: 7px; display: flex; justify-content: space-between; }
   .risk-medium { color: var(--wait); } .risk-high { color: var(--fail); }
 
@@ -99,7 +100,8 @@
 // as text (textContent), never as HTML.
 const COLUMNS = [
   ["Intake", ["intake"]], ["Spec", ["spec"]], ["Build", ["build", "gate"]], ["Review", ["review"]],
-  ["Approve", ["approve", "merging"]], ["Needs you", ["needs-info", "needs-human"]], ["Done", ["merged", "rejected"]],
+  ["Approve", ["approve", "merging"]], ["Needs you", ["needs-info", "needs-human"]],
+  ["Ready to apply", ["ready-to-apply", "merged"]], ["Done", ["applied", "rejected"]],
 ];
 const POLL_MS = 2000;
 let jobs = [], lastDrawn = "", openJob = null, openStep = null;
@@ -122,9 +124,9 @@ function mark(label, result, isNow) {
 }
 
 function card(job) {
-  const waiting = ["needs-info", "needs-human"].includes(job.stage);
+  const waiting = ["needs-info", "needs-human", "ready-to-apply", "merged"].includes(job.stage);
   const c = el("div", "card" + (job.running ? " running" : "") + (waiting ? " you" : "") +
-                      (job.stage === "merged" ? " merged" : "") + (job.stage === "rejected" ? " rejected" : ""));
+                      (job.stage === "applied" ? " applied" : "") + (job.stage === "rejected" ? " rejected" : ""));
   c.tabIndex = 0;
   const id = el("div", "id");
   if (job.running) id.append(el("span", "beat"));
@@ -135,7 +137,7 @@ function card(job) {
   const issue = el("a", "", "issue " + job.issue); issue.href = job.issue_url; issue.target = "_blank";
   links.append(issue);
   if (job.pr) { const pr = el("a", "", "pull " + job.pr); pr.href = job.pr_url; pr.target = "_blank"; links.append(" · ", pr); }
-  if (job.stage === "merged") links.append(" · merged");
+  if (["ready-to-apply", "merged", "applied"].includes(job.stage)) links.append(" · merged");
   c.append(links);
 
   (job.rounds || []).forEach((round, i) => {
@@ -146,7 +148,9 @@ function card(job) {
     c.append(row);
   });
 
-  if (job.note && (waiting || job.stage === "rejected")) c.append(el("div", "note", job.note));
+  if (["ready-to-apply", "merged"].includes(job.stage)) c.append(el("div", "note", "run onboarding/bin/apply " + job.issue));
+  else if (job.note && (waiting || job.stage === "rejected")) c.append(el("div", "note", job.note));
+  if (job.stage === "applied") c.append(el("div", "applied-note", "applied to Vault"));
   const meta = el("div", "meta");
   meta.append(job.risk ? el("span", "risk-" + job.risk, "risk " + job.risk) : el("span"), el("span", "", minutes(job) + " min"));
   c.append(meta);
@@ -162,7 +166,7 @@ function draw() {
   board.replaceChildren();
   COLUMNS.forEach(([name, stages]) => {
     const mine = jobs.filter(j => stages.includes(j.stage)).sort((a, b) => b.started.localeCompare(a.started));
-    const lane = el("section", "lane" + (name === "Needs you" ? " you" : "") + (mine.length ? " busy" : ""));
+    const lane = el("section", "lane" + (["Needs you", "Ready to apply"].includes(name) ? " you" : "") + (mine.length ? " busy" : ""));
     const head = el("h2");
     head.append(el("span", "", name), el("span", "count", String(mine.length)));
     lane.append(head);
@@ -191,8 +195,8 @@ async function poll() {
 
 // ---- the sheet: every step of one job, rendered from the files in its folder
 
-function openSheet(id) {
-  openJob = id; openStep = null;
+function openSheet(id, step) {
+  openJob = id; openStep = step || null;
   for (const part of ["sheet", "shade"]) document.getElementById(part).classList.add("open");
   fillSheet();
 }
@@ -251,7 +255,7 @@ function render(text) {
     return t;
   };
   lines.forEach((line, i) => {
-    if (i === 0 && /^(DECISION|STATUS|VERDICT|GATE|APPROVE|ESCALATE)/.test(line)) {
+    if (i === 0 && /^(DECISION|STATUS|VERDICT|GATE|APPROVE|ESCALATE|APPLY)/.test(line)) {
       const good = /PASS|accepted|READY|APPROVE/.test(line), bad = /FAIL|CHANGES|rejected|BLOCKED|ESCALATE/.test(line);
       out.push(el("div", "verdict" + (good ? " pass" : bad ? " fail" : ""), line));
     } else if (/^#{1,3} /.test(line)) { flush(); out.push(el("h3", "", line.replace(/^#+ /, "")));
@@ -264,7 +268,11 @@ function render(text) {
   return out;
 }
 
-poll();
+// A link can open one step of one job, for example /#GH-1-auth-api/intake.md
+poll().then(() => {
+  const [id, ...step] = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (jobs.some(j => j.id === id)) openSheet(id, step.join("/"));
+});
 setInterval(poll, POLL_MS);
 </script>
 </body>

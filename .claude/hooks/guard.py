@@ -10,6 +10,7 @@ Rules for everyone:
   - no merging a pull request (only onboarding/bin/merge merges)
   - no push outside onboard/*, no force push, no remote delete
   - no terraform apply/destroy and no Vault write to anything but 127.0.0.1
+  - no applying a merged request (onboarding/bin/apply is a person's step)
 
 Extra rules for agents (calls that carry an agent id):
   - file edits only inside onboarding/jobs/ and a worktree's requests/<id>/
@@ -75,6 +76,14 @@ def check_merge(command):
         deny("agents and sessions do not merge pull requests. Only onboarding/bin/merge merges, after the gate.")
     if re.search(r"\bgh\s+api\b", lowered) and re.search(r"pulls/[^\s/]+/merge|mergepullrequest|enablepullrequestautomerge", lowered):
         deny("merging through the GitHub API is not allowed. Only onboarding/bin/merge merges.")
+
+
+def check_apply(command):
+    """The apply is the one step a person takes. Claude reads `apply --help` at most."""
+    if re.search(r"onboarding/bin/apply\b(?!\s+(-h|--help)\b)", command):
+        deny("applying to Vault is a person's step. Ask the person to run onboarding/bin/apply in their own terminal.")
+    if re.search(r"onboarding/bin/job\s+applied\b", command):
+        deny("only onboarding/bin/apply records a job as applied, and a person runs it.")
 
 
 # ------------------------------------------------------------------- pushing
@@ -181,6 +190,7 @@ def main():
     if tool == "Bash":
         command = tool_input.get("command", "")
         check_merge(command)
+        check_apply(command)
         check_push(command, call.get("cwd") or os.getcwd())
         check_vault_target(command)
         if is_agent:

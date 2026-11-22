@@ -1,0 +1,72 @@
+# Example only. This file is not in .github/workflows, so GitHub does not run it.
+# It has not been run. It shows the shape of the apply step for a shared Vault:
+# plan on merge, a person approves in GitHub, the approved plan is applied.
+#
+# Before you copy it to .github/workflows/ you need:
+#   1. A GitHub Environment named `vault-prod` with required reviewers.
+#      The reviewers are the people who may release to Vault.
+#   2. JWT auth in Vault for GitHub OIDC, with a role for this repository.
+#      Its policy lets the pipeline write policies and Kubernetes auth roles, and nothing else.
+#   3. A remote Terraform state backend, one state per request.
+#      The requests in this repo use local state, which only works on one machine.
+#   4. Repository variables VAULT_ADDR and VAULT_ROLE.
+name: Apply to shared Vault
+
+on:
+  push:
+    branches: [main]
+    paths: ["requests/GH-*/03-terraform/**"]
+
+permissions:
+  contents: read
+  id-token: write   # GitHub OIDC token, exchanged for a short-lived Vault token
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      requests: ${{ steps.changed.outputs.requests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: changed
+        # The request folders this push added.
+        run: |
+          list=$(git diff --name-only HEAD~1 HEAD -- requests/ | cut -d/ -f2 | sort -u | grep '^GH-' | jq -R . | jq -sc .)
+          echo "requests=$list" >> "$GITHUB_OUTPUT"
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.requests != '[]'
+    runs-on: ubuntu-latest
+    environment: vault-prod          # the run waits here until a reviewer approves
+    strategy:
+      max-parallel: 1
+      matrix:
+        request: ${{ fromJSON(needs.plan.outputs.requests) }}
+    defaults:
+      run:
+        working-directory: requests/${{ matrix.request }}/03-terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ vars.VAULT_ADDR }}
+          method: jwt
+          role: ${{ vars.VAULT_ROLE }}
+          exportToken: true
+      - run: terraform init -input=false
+      # Plan and apply in the same job, after the approval, so the plan is fresh.
+      # To show the plan before the approval, plan in the first job, upload the
+      # plan file as an artifact and apply that file here.
+      - run: terraform plan -input=false -out=apply.tfplan
+        env:
+          TF_VAR_vault_addr: ${{ vars.VAULT_ADDR }}
+          TF_VAR_vault_token: ${{ env.VAULT_TOKEN }}
+      - run: terraform apply -input=false apply.tfplan
+        env:
+          TF_VAR_vault_addr: ${{ vars.VAULT_ADDR }}
+          TF_VAR_vault_token: ${{ env.VAULT_TOKEN }}
