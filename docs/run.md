@@ -1,6 +1,6 @@
 # How to run it
 
-This is the full path, from an empty laptop to a service onboarded in Vault. Steps 1 to 5 are done once. Steps 6 to 11 are done for every request.
+This guide takes you from a laptop with nothing installed to a service onboarded in Vault. You do steps 1 to 5 once. Steps 6 to 11 are what you repeat for every request, and after the first time they take a few minutes.
 
 ## 1. Install the tools
 
@@ -133,7 +133,7 @@ onboarding/bin/labels
 
 It uses `gh`, so it creates the labels in the repository that `origin` points to. Your GitHub account needs write access to it. It is safe to run again: an existing label gets its colour and description updated.
 
-Check that all eight are there:
+Check that all nine are there:
 
 ```bash
 gh label list --search onboard
@@ -181,49 +181,49 @@ Leave the session open. It starts each agent in the background and moves the job
 
 ## 9. Watch it
 
-On the board, the card moves from lane to lane.
+You can follow a job on the board and on GitHub. On the board, the card moves from lane to lane as the job advances.
 
 ![The board: the lanes on top, the steps of one job below](img/board.png)
 
 Under the lanes, a panel shows the steps of one job, one tab per step. It follows the job that moved last and opens its latest step. Click a card to keep the panel on that job. "Follow latest" lets it move again.
 
+The screenshots below are from the first real job, issue 1, and show what each step leaves behind.
+
 ### Intake
 
-The decision, the five values and the risk.
+Intake's decision, the five values it found in the issue and the risk it gave the request.
 
 ![Intake step on the board](img/step-intake.png)
 
 ### Spec
 
-R1 to R5, copied from the issue.
+The spec, with R1 to R5 copied from the issue and the field each value came from.
 
 ![Spec step on the board](img/step-spec.png)
 
 ### Build
 
-What the builder wrote and the pull request it opened.
+What the builder wrote, and the pull request it opened.
 
 ![Build step on the board](img/step-build.png)
 
 ### Gate
 
-Every check, with PASS or FAIL.
+The gate report. Every check is listed with PASS or FAIL, so when a job fails you can see exactly where.
 
 ![Gate step on the board](img/step-gate.png)
 
 ### Review
 
-The reviewer's verdict for the commit.
+The reviewer's verdict, and the commit it reviewed.
 
 ![Review step on the board](img/step-review.png)
 
 ### Decision
 
-The approver's decision and its evidence.
+The approver's decision to merge or escalate, with the evidence for it.
 
 ![Decision step on the board](img/step-decision.png)
-
-The screenshots are from the first real job, issue 1.
 
 On GitHub, the issue has one stage label at a time:
 
@@ -248,7 +248,7 @@ You can ask about a job at any time:
 
 ## 11. Apply it
 
-The line stops at the merge. The last step is yours. Claude cannot run it: the script needs a terminal with a person, and the hook refuses it for agents and sessions.
+The line stops at the merge, and at that point nothing is in Vault yet. The last step is yours. Claude cannot run it for you, because the script needs a terminal with a person at it and the hook refuses the command for agents and sessions.
 
 The merged request is on `main`:
 
@@ -308,11 +308,87 @@ onboarding/bin/apply --all
 
 The script refuses any address that is not on 127.0.0.1. For a shared Vault, the apply belongs in a pipeline with an approval step. [examples/apply-shared-vault.yml](examples/apply-shared-vault.yml) shows the shape. It is an example and has not been run.
 
+### Check it yourself with `vault`
+
+The script already checks the Vault, but you can confirm it by hand. These commands use the example request (team `identity`, service `auth-api`, secret path `config`). Put in your own values.
+
+Point the `vault` CLI at your local Vault:
+
+```bash
+export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root
+```
+
+The policy exists and only covers the service's own paths:
+
+```bash
+vault policy read identity-auth-api
+```
+
+```
+path "secret/data/teams/identity/auth-api/*" {
+  capabilities = ["read", "list"]
+}
+
+path "secret/metadata/teams/identity/auth-api/*" {
+  capabilities = ["read", "list"]
+}
+
+path "secret/metadata/teams/identity/auth-api/" {
+  capabilities = ["list"]
+}
+```
+
+The Kubernetes role is bound to one service account, one namespace and that one policy:
+
+```bash
+vault read auth/kubernetes/role/identity-auth-api
+```
+
+In the output, check `bound_service_account_names [auth-api]`, `bound_service_account_namespaces [identity]` and `token_policies [identity-auth-api]`.
+
+The secret paths exist. They start with placeholder values that the team fills in:
+
+```bash
+vault kv get secret/teams/identity/auth-api/config
+```
+
+Now act as the service. Create a token that has only the new policy:
+
+```bash
+SVC=$(vault token create -policy=identity-auth-api -no-default-policy -field=token)
+```
+
+The service can read and list its own secrets. Both commands must succeed:
+
+```bash
+VAULT_TOKEN=$SVC vault kv get secret/teams/identity/auth-api/config
+```
+
+```bash
+VAULT_TOKEN=$SVC vault kv list secret/teams/identity/auth-api
+```
+
+The service cannot write, cannot reach another team and cannot read Vault's settings. Each of these must end with `permission denied`:
+
+```bash
+VAULT_TOKEN=$SVC vault kv put secret/teams/identity/auth-api/config x=y
+```
+
+```bash
+VAULT_TOKEN=$SVC vault kv get secret/teams/other/thing/config
+```
+
+```bash
+VAULT_TOKEN=$SVC vault secrets list
+```
+
+If all of that holds, the onboarding worked.
+
 ## Examples to try
 
 These five examples show the line saying yes and saying no. Each command files an issue with the same fields as the form. Run the commands in the repository folder. `gh` prints the issue number.
 
-Example 1 is the same kind of request as issue 1, which ran and merged. Example 5 was run and gives the result shown. Examples 2, 3 and 4 have not been run as real issues yet. What they should do is described from how the line is built.
+I ran examples 1, 2, 3 and 5, and what they did is described below. Example 4 has not run as three real issues at once yet, so its description is what the line is built to do.
 
 ### 1. A plain onboarding
 
@@ -326,7 +402,7 @@ Then, in Claude Code:
 /onboard run <number>
 ```
 
-The card goes through every lane and stops in **Ready to apply**. The issue gets the label `onboard:ready-to-apply`. Apply it as in step 11.
+The card goes through every lane and stops in **Ready to apply**, and the issue gets the label `onboard:ready-to-apply`. Apply it as in step 11. Issue 1 was this kind of request. It passed the gate and the review in the first round.
 
 ### 2. A request with no namespace
 
@@ -336,9 +412,9 @@ gh issue create --label onboard --title "Onboard billing-worker to Vault" --body
 
 Run it with `/onboard run <number>`.
 
-Intake should ask for the namespace in a comment on the issue. The label becomes `onboard:needs-info` and the card moves to **Human gate**. No branch and no pull request are created.
+Intake asks for the namespace in a comment on the issue. The label becomes `onboard:needs-info` and the card moves to **Human gate**. No branch and no pull request exist at this point.
 
-To continue, answer on the issue, for example "The namespace is billing". Then run `/onboard run <number>` again. Intake reads the answer and the job goes on.
+To continue, answer on the issue, for example "The namespace is billing", and run `/onboard run <number>` again. Intake reads the answer and the job goes on. Issue 3 was this request. After the answer it went through in one round and was applied.
 
 ### 3. A request for another team's path
 
@@ -348,7 +424,7 @@ gh issue create --label onboard --title "Onboard search-indexer to Vault" --body
 
 Run it with `/onboard run <number>`.
 
-Intake should reject it. The second path belongs to team billing. The reason is a comment on the issue, the issue is closed, and the card goes to **Done** with its title struck through. No branch and no pull request are created.
+Intake rejects it, because the second path belongs to team billing. The reason is a comment on the issue, the issue is closed, and the card goes to **Done** with its title struck through. No branch and no pull request are created. Issue 5 was this request, and intake rejected it in about half a minute.
 
 ### 4. Three at once
 
