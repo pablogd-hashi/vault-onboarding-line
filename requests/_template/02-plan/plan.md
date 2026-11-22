@@ -2,25 +2,18 @@
 
 | Field | Value |
 |-------|-------|
-| **Ticket** | PE-XXX |
-| **Spec reference** | `01-spec/spec.md` |
-| **Status** | Draft |
-| **Author** | |
+| **Request** | GH-NNN-SERVICE_NAME |
+| **Issue** | #NNN |
+| **Spec** | `01-spec/spec.md` |
 | **Date** | |
 
 ## Summary
 
-One paragraph describing what Terraform will create and why.
-
-## Module selection
-
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| Terraform module | `terraform/modules/vault-service-onboard` | Standard platform module for Vault service onboarding |
+One paragraph: what Terraform will create and why.
 
 ## Input mapping
 
-Values copied verbatim from approved spec — do not invent:
+Values copied from the spec, character for character.
 
 | Module variable | Value | Spec requirement |
 |-----------------|-------|------------------|
@@ -36,28 +29,19 @@ Values copied verbatim from approved spec — do not invent:
 
 | Resource | Name | Purpose |
 |----------|------|---------|
-| `vault_policy` | `{team}-{service_name}` | Least-privilege read/list |
-| `vault_kubernetes_auth_backend_role` | `{team}-{service_name}` | SA binding |
-| `vault_kv_secret_v2` | per path in `secret_paths` | Path scaffolding |
+| `vault_policy` | `{team}-{service_name}` | Read and list on the service's own paths |
+| `vault_kubernetes_auth_backend_role` | `{team}-{service_name}` | Binds one service account in one namespace |
+| `vault_kv_secret_v2` | one per path in `secret_paths` | Path scaffolding, no real values |
 
-## Risk assessment
+## Risk
 
 | Risk | Mitigation |
 |------|------------|
-| Over-broad policy | Policy scoped to single service path prefix |
-| Wrong SA binding | Values taken from spec, validated in plan review |
+| Over-broad policy | The module scopes the policy to one service prefix; the gate proves it against a throwaway Vault |
+| Wrong binding | Values come from the spec; the gate reads the role back |
 
 ## Rollback
 
 ```bash
-cd requests/PE-XXX/03-terraform
-terraform destroy
+terraform -chdir=requests/GH-NNN-SERVICE_NAME/03-terraform destroy
 ```
-
-## Sign-off
-
-| Role | Name | Approved | Date |
-|------|------|----------|------|
-| Platform engineer | | ☐ | |
-
-**Do not proceed to Terraform until Platform engineer approval is recorded.**

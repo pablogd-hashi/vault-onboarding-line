@@ -2,47 +2,46 @@
 
 | Field | Value |
 |-------|-------|
-| **Ticket** | PE-XXX |
-| **Ticket provider** | jira |
-| **Status** | Draft |
+| **Request** | GH-NNN-SERVICE_NAME |
+| **Issue** | #NNN |
 | **Author** | |
 | **Date** | |
 
 ## Context
 
-<!-- Why is this request needed? Link to service documentation or architecture decision. -->
+<!-- Why the service needs Vault access, in the requester's words. Do not add facts the issue does not state. -->
 
 ## Requirements
 
-| # | Requirement | Source (ticket field) |
-|---|-------------|---------------------|
-| R1 | | Service name |
-| R2 | | Team |
-| R3 | | K8s namespace |
-| R4 | | K8s service account |
-| R5 | | Secret paths |
+Every value is copied from the issue. A value the issue does not give is never invented.
+
+| # | Requirement | Source (issue field) |
+|---|-------------|----------------------|
+| R1 | Service name: `` | Service name |
+| R2 | Team: `` | Team |
+| R3 | Kubernetes namespace: `` | Kubernetes namespace |
+| R4 | Service account: `` | Kubernetes service account |
+| R5 | Secret paths: `` | Secret paths |
+
+## Acceptance criteria
+
+<!-- From the issue's acceptance criteria. -->
 
 ## Non-goals
 
-- Production Vault cluster changes (local environment only in v1)
-- Application secret value injection (paths only)
-- Cross-team secret access
+- Changes to any Vault other than a local one
+- Secret values (paths only)
+- Access to another team's or another service's paths
+- Changes to the module, the platform layer or the policies
 
 ## Verification
 
-How we will confirm this request is fulfilled:
+The gate (`onboarding/bin/gate`) proves these against a throwaway Vault before merge:
 
-- [ ] Vault policy `{team}-{service_name}` exists with read/list on team paths only
-- [ ] Kubernetes auth role bound to `{namespace}/{service_account}`
-- [ ] KV paths scaffolded: `secret/teams/{team}/{service_name}/{path}` for each requested path
-- [ ] `terraform plan` shows only expected resources
-- [ ] Terratest or manual Vault CLI confirms policy content
+- Policy `{team}-{service_name}` grants read and list on `secret/(data|metadata)/teams/{team}/{service_name}/` only
+- Kubernetes auth role `{team}-{service_name}` is bound to `{namespace}/{service_account}` and carries only that policy
+- A token with only that policy reads each path in R5 and is denied on write, delete, sibling services, other teams and `sys/`
 
-## Sign-off
+## Assumptions
 
-| Role | Name | Approved | Date |
-|------|------|----------|------|
-| Requester | | ☐ | |
-| Platform lead | | ☐ | |
-
-**Do not proceed to implementation plan until Platform lead approval is recorded.**
+<!-- Anything the spec-writer had to assume. The approver escalates assumptions that are really decisions. Write "None" if there are none. -->

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Ticket** | PE-001 |
+| **Request** | PE-001 (onboarded by hand before the line existed; kept as the worked example) |
 | **Spec reference** | `01-spec/spec.md` |
 | **Status** | Approved |
 | **Author** | platform-engineer |
