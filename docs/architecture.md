@@ -74,6 +74,8 @@ The gate runs twice. The merge script syncs the branch with main and runs the ga
 
 It plans the merged request against the Vault in `apply_to`. It shows the policy in full, the role, the secret paths and the Terraform plan line, and asks for `yes`. It then applies the plan file it showed, not a new plan.
 
+The merge gate keeps the text of its Terraform plan, and the board shows it for a job that is ready to apply. That plan was made on the gate's throwaway Vault. The apply script plans again on the target Vault, and that second plan is the one it applies.
+
 After the apply it checks the Vault itself. The policy text must be the planned text. A token with only that policy must read its own paths and must get HTTP 403 `permission denied` on a write, on another team's path and on `sys/`. The role must have the planned service account, namespace and policy.
 
 Three things keep this step with a person. The script stops if it has no terminal. The hook refuses the command for agents and sessions. The script refuses any address that is not on 127.0.0.1.

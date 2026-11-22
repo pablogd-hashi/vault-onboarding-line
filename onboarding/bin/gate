@@ -309,6 +309,9 @@ def check_behaviour(vault, v):
     record("role: only its own policy", role.get("token_policies") == [policy], str(role.get("token_policies")))
 
 
+plan_text = []
+
+
 def judge_request(work, request, module_dir, line_mode):
     req_dir = work / "requests" / request
     missing = [f for f in REQUEST_FILES if not (req_dir / f).is_file()]
@@ -353,6 +356,7 @@ def judge_request(work, request, module_dir, line_mode):
         record("terraform validate", ok, last_line(out))
         ok, out = run(["terraform", "plan", "-no-color", "-out=plan.tfplan"], cwd=tf_dir, env=env)
         record("terraform plan", ok, last_line(out))
+        plan_text.append(out)  # kept for the person who applies: what the request creates
 
         ok, plan_json = run(["terraform", "show", "-json", "plan.tfplan"], cwd=tf_dir, env=env)
         log.pop()  # the plan JSON is large and not useful in the log
@@ -430,6 +434,8 @@ def main():
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
         (out / "gate.log").write_text("\n".join(log))
+        if plan_text:
+            (out / "plan.txt").write_text(plan_text[0] + "\n")
         rows = "\n".join("| %s | %s | %s |" % (n, "PASS" if ok else "**FAIL**", d.replace("|", "/")) for n, ok, d in results)
         (out / "gate.md").write_text("%s\nCOMMIT: %s\n\n| Check | Result | Detail |\n|---|---|---|\n%s\n" % (verdict, commit, rows))
     sys.exit(0 if passed else 1)

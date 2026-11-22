@@ -183,9 +183,9 @@ Leave the session open. It starts each agent in the background and moves the job
 
 On the board, the card moves from lane to lane.
 
-![The board with one merged job waiting for a person to apply it](img/board-ready-to-apply.png)
+![The board: the lanes on top, the steps of one job below](img/board.png)
 
-Click a card to read each step. There is one tab per step.
+Under the lanes, a panel shows the steps of one job, one tab per step. It follows the job that moved last and opens its latest step. Click a card to keep the panel on that job. "Follow latest" lets it move again.
 
 ### Intake
 
@@ -259,6 +259,10 @@ requests/GH-12-auth-api/
   03-terraform/main.tf
 ```
 
+Before you apply, read the plan on the board. The tab "to apply" shows the Terraform plan from the merge gate: the policy, the role and the secret paths the request creates.
+
+![The to apply tab with the Terraform plan](img/step-to-apply.png)
+
 You need a Vault on 127.0.0.1. For a dev Vault, in its own terminal:
 
 ```bash
@@ -283,6 +287,10 @@ The script does this:
 4. It applies the plan it showed.
 5. It checks the Vault. A token with only the new policy must read its own paths. It must get HTTP 403 on a write, on another team's path and on `sys/`. The role must be as planned.
 6. It comments the result on the issue, moves the card to **Done** and closes the issue.
+
+The result is also on the board, in the tab "apply".
+
+![The apply tab with the checks made on the Vault](img/step-apply.png)
 
 If the Vault has no Kubernetes auth mount yet, the script asks first whether to create it. This happens once per Vault.
 
@@ -328,7 +336,7 @@ gh issue create --label onboard --title "Onboard billing-worker to Vault" --body
 
 Run it with `/onboard run <number>`.
 
-Intake should ask for the namespace in a comment on the issue. The label becomes `onboard:needs-info` and the card moves to **Needs you**. No branch and no pull request are created.
+Intake should ask for the namespace in a comment on the issue. The label becomes `onboard:needs-info` and the card moves to **Human gate**. No branch and no pull request are created.
 
 To continue, answer on the issue, for example "The namespace is billing". Then run `/onboard run <number>` again. Intake reads the answer and the job goes on.
 

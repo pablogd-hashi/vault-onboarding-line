@@ -26,7 +26,7 @@ ready to apply → you run onboarding/bin/apply: it shows the policy, the role
                  and the plan, asks, applies, and checks the Vault
 ```
 
-![The board with one merged job waiting for a person to apply it](docs/img/board-ready-to-apply.png)
+![The board: the lanes on top, the steps of one job below](docs/img/board.png)
 
 ## What you need
 
@@ -64,9 +64,11 @@ On GitHub, the issue has one stage label at a time:
 
 The issue closes when a person has applied the request. The side exits are `onboard:needs-info` and `onboard:needs-human`. Every step leaves a comment. Intake's decision is on the issue. Each gate report, the review and the approver's decision are on the pull request.
 
-On the board, there is one card per job, in the lane of its stage. A card shows the gate and review result of every round, the risk, the minutes elapsed and a dot while the job runs. Click a card to read every step.
+On the board, there is one card per job, in the lane of its stage. A card shows the gate and review result of every round, the risk, the minutes elapsed and a dot while the job runs. Under the lanes, a panel shows the steps of one job, one tab per step. It follows the job that moved last. Click a card to keep the panel on that job.
 
-![The gate report of a job, opened from its card](docs/img/step-gate.png)
+When a job is ready to apply, the panel shows the Terraform plan from the merge gate, so you can read what will be written to Vault before you run the apply script.
+
+![The Terraform plan of a merged job, shown on the board](docs/img/step-to-apply.png)
 
 ## Agents
 
