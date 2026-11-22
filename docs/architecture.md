@@ -2,23 +2,23 @@
 
 ## The problem
 
-Onboarding a service to Vault is the same small change every time: one policy, one Kubernetes auth role, a few secret paths. It is easy to do and easy to get subtly wrong, and a wrong one hands a service someone else's secrets. That makes it a good job for a machine and a bad job to approve by skimming.
+Onboarding a service to Vault is the same small change every time: one policy, one Kubernetes auth role and a few secret paths. A mistake in it can give a service access to another team's secrets. A person who approves these changes all day stops reading them closely.
 
-This repository lets agents do the work and removes the human approval. That is only acceptable because approval is replaced by something stricter than a skim: a gate that proves, on a real Vault, what the new policy can and cannot do.
+This repository lets agents do the work and removes the human approval. The approval is replaced by a gate. The gate applies the request to a real Vault and tests what the new policy can and cannot do.
 
-## Three kinds of parts
+## The parts
 
-| Part | Does | Trusted to |
+| Part | What it does | What it is trusted with |
 |---|---|---|
-| Agents (`.claude/agents/`) | Judgement and writing: is this request sane, what does the spec say, does the PR match the issue | Nothing. Each writes one file; a script reads it. |
-| Scripts (`onboarding/bin/`) | Everything deterministic: state, labels, comments, the gate, the merge | Everything that matters. |
-| The hook (`.claude/hooks/guard.py`) | Refuses tool calls that break a rule | Stopping mistakes and casual misuse. |
+| Agents (`.claude/agents/`) | Judgement and writing. Is the request valid, what does the spec say, does the pull request match the issue. | Nothing. Each agent writes one file and a script reads it. |
+| Scripts (`onboarding/bin/`) | State, labels, comments, the gate, the merge. | Every decision that moves a job. |
+| The hook (`.claude/hooks/guard.py`) | Refuses tool calls that break a rule. | Stopping mistakes. |
 
-The orchestrator (the `/onboard` skill) only connects them: it runs a script, spawns the agent the script names, and runs the next script when the agent finishes. It writes no spec and no code, and it never reads the issue text.
+The orchestrator is the `/onboard` skill. It runs a script, starts the agent the script names, and runs the next script when the agent finishes. It writes no spec and no code. It does not read the issue text.
 
-## A job, stage by stage
+## Stages
 
-State lives in `onboarding/jobs/<id>/job.json`. Only `onboarding/bin/job` writes it. Allowed moves:
+The state of a job is in `onboarding/jobs/<id>/job.json`. Only `onboarding/bin/job` writes it. These are the allowed moves:
 
 ```
 intake ──→ spec ──→ build ──→ gate ──→ review ──→ approve ──→ merging ──→ merged
@@ -27,50 +27,62 @@ intake ──→ spec ──→ build ──→ gate ──→ review ──→ 
   └→ rejected                     (next round, or needs-human after round 3)
 ```
 
-A move also needs evidence, read from files and from git, not from what an agent says:
+A move needs evidence. The script reads the evidence from files and from git. It does not use what the agent replied.
 
 | Move | Evidence |
 |---|---|
 | intake → spec | `intake.md` starts with `DECISION: accepted` and names a valid service |
 | spec → build | the spec file exists and has R1 to R5 |
-| build → gate | `build.md` says READY, the branch is pushed, exactly one open PR |
+| build → gate | `build.md` says READY, the branch is pushed, there is exactly one open pull request |
 | gate → review | the gate script exited 0 and wrote `GATE: PASS` |
 | review → approve | `review.md` says PASS for the commit the branch is at |
-| approve → merging | `decision.md` says APPROVE and the round's gate and review are PASS |
-| merging → merged | the merge script's own gate passed and GitHub merged the PR |
+| approve → merging | `decision.md` says APPROVE, and the gate and review of this round are PASS |
+| merging → merged | the merge script's own gate passed and GitHub merged the pull request |
 
-Each job has its own git worktree (`.worktrees/<id>`) and branch (`onboard/<id>`), so three jobs run side by side without touching each other. The script refuses a fourth.
+Each job has its own git worktree, `.worktrees/<id>`, and its own branch, `onboard/<id>`. Three jobs can run at the same time without touching each other. The script refuses a fourth.
 
-## The trust boundary
+## Issue text
 
-The issue text is the only thing in the system written by a stranger.
+The issue is the only input written by someone outside the line. It is treated as data.
 
 - Only issues labelled `onboard` run. Adding a label needs triage rights on the repository.
-- The script saves the issue to `issue.md` as quoted text under a notice that it is data. Only the author's and the operator's comments are included.
-- Nothing pastes issue text into a prompt. Agents are told where the file is.
-- Intake, the first reader, has no shell. The builder never reads the issue, only the spec.
-- Whatever an agent is talked into, it can only produce one new request folder, and that folder must pass the gate.
+- The script saves the issue to `issue.md` as quoted text, under a notice that says it is data. It includes only the comments of the author and of the operator.
+- No prompt contains issue text. Agents are told where the file is.
+- Intake reads the issue first and has no shell. The builder does not read the issue. It reads the spec.
+- An agent can only produce one new request folder, and that folder must pass the gate.
 
-## Why the gate cannot be argued with
+## The gate
 
-- **Read from the main checkout.** The script, the policies, the module and the template that judge a branch are the main checkout's copies, and in line mode they must be identical to `origin/main`. A branch cannot bring its own judge.
-- **Shape before execution.** `main.tf` must be the template with five values changed, and the values must match fixed patterns. Only then does Terraform run. Arbitrary HCL never reaches `terraform init`.
-- **Policy as parsed text.** Conftest reads the plan JSON, pulls every `path` stanza out of the Vault policy, and judges each path and each capability. Unparsed leftovers fail. Missing or unknown values fail.
-- **Behaviour, not belief.** The request is applied to a throwaway Vault. A token with only the new policy must read its own paths and must be refused, with a real HTTP 403 `permission denied`, on write, delete, a sibling service, another team and `sys/`. The secrets it must not reach are created first, so "not found" cannot pass for "denied".
-- **No skips.** A tool that is missing or a check that cannot run fails the gate.
-- **Twice.** The merge script syncs the branch with main and runs the gate again, because another job may have merged the same service in the meantime.
+The gate is read from the main checkout. The script, the policies, the module and the template that judge a branch are the copies in the main checkout. In the line they must also be identical to `origin/main`. A branch cannot change what judges it.
 
-## What the hook does and does not do
+The file shape is checked before Terraform runs. `main.tf` must be the template with five values changed, and each value must match a fixed pattern. Other HCL never reaches `terraform init`.
 
-The hook stops an agent or a session from merging, pushing outside `onboard/*`, force pushing, aiming Terraform or Vault writes at anything but 127.0.0.1, and (for agents) editing anything except its job folder and its request folder. A crash in the hook refuses the call.
+Conftest reads the plan JSON. It takes every `path` stanza out of the Vault policy and checks each path and each capability. Text it cannot parse is a failure. A missing or unknown value is a failure.
 
-Its shell rules match command text, so they are a strong guard against mistakes, not a sandbox. The defence that does not depend on pattern matching is the gate reading its judges from the main checkout and comparing them with `origin/main`.
+The request is then applied to a throwaway Vault. A token with only the new policy must read its own paths. It must be refused with HTTP 403 `permission denied` on write, on delete, on a sibling service, on another team and on `sys/`. The secrets it must not reach are created first, so a "not found" cannot count as a denial.
 
-The main session is deliberately not restricted from editing the gate, otherwise nobody could maintain it. Changes to the line go through their own branch and pull request, made by a person.
+The gate has no skips. A missing tool, or a check that cannot run, fails the gate.
+
+The gate runs twice. The merge script syncs the branch with main and runs the gate again, because another job may have merged the same service in the meantime.
+
+## The hook
+
+The hook stops an agent or a session from doing these things:
+
+- merging
+- pushing outside `onboard/*`
+- force pushing
+- running Terraform or Vault writes against anything but 127.0.0.1
+
+It also stops an agent from editing anything except its job folder and its request folder. If the hook crashes, the call is refused.
+
+The shell rules match the text of the command. They stop mistakes, but they are not a sandbox. The protection that does not depend on matching text is the gate, which reads its files from the main checkout and compares them with `origin/main`.
+
+The main session can edit the gate. Without that, nobody could maintain it. A change to the line is made by a person, on its own branch and pull request.
 
 ## Limits
 
 - The gate needs the network the first time it runs, to download the Vault provider. After that it uses a local cache.
-- The line handles one shape of request. Anything that needs a change to the module, the platform layer or the policies is rejected at intake and done by a person.
-- The line never applies to a shared Vault. Getting a merged request into a real environment is a separate, human step.
-- Merge conflicts are not resolved by the line; they escalate.
+- The line handles one shape of request. A request that needs a change to the module, the platform layer or the policies is rejected at intake and done by a person.
+- The line does not apply to a shared Vault. Applying a merged request to a real environment is a separate step, done by a person.
+- The line does not resolve merge conflicts. They escalate.

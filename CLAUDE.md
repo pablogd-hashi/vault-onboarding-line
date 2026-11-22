@@ -2,7 +2,7 @@
 
 A GitHub issue asking to onboard a service to Vault goes in. A merged pull request with the spec, the plan and the Terraform comes out. People are involved only when the line asks a question or escalates.
 
-Run it with the `/onboard` skill. Scripts in `onboarding/bin/` own everything deterministic: job state (`job`), the gate (`gate`), the merge (`merge`). Agents in `.claude/agents/` each do one role. `.claude/hooks/guard.py` enforces the shell rules below whether or not anyone remembers them.
+Run it with the `/onboard` skill. Scripts in `onboarding/bin/` own everything deterministic: job state (`job`), the gate (`gate`), the merge (`merge`). Agents in `.claude/agents/` each do one role. `.claude/hooks/guard.py` enforces the shell rules below.
 
 ## Rules
 

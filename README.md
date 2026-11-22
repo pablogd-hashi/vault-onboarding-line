@@ -1,8 +1,10 @@
 # vault-onboarding-line
 
-A GitHub issue asking to onboard a service to Vault goes in. A merged pull request with the spec, the plan and the Terraform comes out. Nobody approves anything in between. A person is involved only when the line asks a question or escalates.
+A GitHub issue asking to onboard a service to Vault goes in. A merged pull request with the spec, the plan and the Terraform comes out. No person approves anything in between. A person is involved only when the line asks a question or escalates.
 
-It runs in Claude Code: one skill orchestrates, five agents each do one role, and scripts do everything that must be deterministic.
+It runs in Claude Code. One skill orchestrates. Five agents each do one role. Scripts do everything that must give the same result every time.
+
+## The line
 
 ```
 issue labelled `onboard`
@@ -15,7 +17,7 @@ builder ───→ 02-plan/plan.md, 03-terraform/main.tf, draft PR "Closes #n"
       │          ▲
 gate (script) ─FAIL┤
       │ PASS       │
-reviewer ─CHANGES──┘        at most 3 rounds, then a human
+reviewer ─CHANGES──┘        at most 3 rounds, then a person
       │ PASS
 approver ── APPROVE  → merge script: sync with main, gate again, merge
          └─ ESCALATE → PR ready for you, issue labelled onboard:needs-human
@@ -23,83 +25,101 @@ approver ── APPROVE  → merge script: sync with main, gate again, merge
 
 ## What you need
 
-`git`, `gh` (logged in), `terraform`, `vault`, `conftest`, `python3` (3.9 or newer) and Claude Code. No Docker, no frameworks, no build step.
+`git`, `gh` (logged in), `terraform`, `vault`, `conftest`, `python3` 3.9 or newer, and Claude Code. No Docker, no framework, no build step.
 
 ## Run it
 
+The full guide is [docs/run.md](docs/run.md). The short version:
+
 ```bash
-onboarding/bin/labels            # once per repository: creates the stage labels
-python3 onboarding/board/serve.py   # the board, http://127.0.0.1:8765
+onboarding/bin/labels
 ```
 
-File a request with the "Onboard a service to Vault" issue form (it adds the `onboard` label). Then, in Claude Code in this repository:
+```bash
+python3 onboarding/board/serve.py
+```
+
+The first command creates the stage labels, once per repository. The second starts the board at http://127.0.0.1:8765.
+
+File a request with the "Onboard a service to Vault" issue form. Then, in Claude Code in this repository:
 
 | Command | What it does |
 |---|---|
-| `/onboard run` | Every open `onboard` issue, three at a time. Also resumes unfinished jobs. |
-| `/onboard run 12` | Only issue 12. |
+| `/onboard run` | Runs every open `onboard` issue, three at a time. Also resumes unfinished jobs. |
+| `/onboard run 12` | Runs issue 12 only. |
 | `/onboard where is 12?` | Answers from the job's state and files. |
-| `/onboard for 12: use namespace identity-prod` | Feedback for a job that needs you; it goes back to the builder. |
+| `/onboard for 12: use namespace identity-prod` | Sends your feedback to the builder, for a job that is waiting for you. |
 | `/onboard onboard search-api for team discovery ...` | Files a new request for you. |
 
-## Watching a job
+## Where to watch
 
-**On GitHub.** The issue carries one stage label at a time:
-`onboard` → `onboard:intake` → `onboard:spec` → `onboard:build` → `onboard:review` → `onboard:approve`, then the issue closes when the pull request merges. Side exits are `onboard:needs-info` and `onboard:needs-human`. Every step leaves a comment: intake's decision on the issue; each round's gate report, the review and the approver's decision on the pull request.
+On GitHub, the issue has one stage label at a time:
 
-**On the board.** One card per job, in the column of its stage, with a chip per gate and review of every round (green pass, red fail), the risk, minutes elapsed and a dot while it runs. Click a card to read every step.
+`onboard` → `onboard:intake` → `onboard:spec` → `onboard:build` → `onboard:review` → `onboard:approve`
 
-## Who does what
+The issue closes when the pull request merges. The side exits are `onboard:needs-info` and `onboard:needs-human`. Every step leaves a comment. Intake's decision is on the issue. Each gate report, the review and the approver's decision are on the pull request.
+
+On the board, there is one card per job, in the lane of its stage. A card shows the gate and review result of every round, the risk, the minutes elapsed and a dot while the job runs. Click a card to read every step.
+
+## Agents
 
 | Role | Reads | Writes | Shell |
 |---|---|---|---|
-| `intake` | the issue file | `intake.md`: accepted, needs-info or rejected | none |
-| `spec-writer` | issue file, intake | `01-spec/spec.md` (R1 to R5) | none |
-| `builder` | the spec, last gate and review | `02-plan/plan.md`, `03-terraform/main.tf`, the draft PR | yes |
-| `reviewer` | spec, plan, diff, gate report | `review.md`: PASS or CHANGES | read-only use |
-| `approver` | the whole job | `decision.md`: APPROVE or ESCALATE | read-only use |
+| `intake` | the issue file | `intake.md`: accepted, needs-info or rejected | no |
+| `spec-writer` | the issue file, intake | `01-spec/spec.md` with R1 to R5 | no |
+| `builder` | the spec, the last gate and review | `02-plan/plan.md`, `03-terraform/main.tf`, the draft PR | yes |
+| `reviewer` | spec, plan, diff, gate report | `review.md`: PASS or CHANGES | read-only |
+| `approver` | the whole job | `decision.md`: APPROVE or ESCALATE | read-only |
 
-Builder and reviewer run on different models. Each agent replies with one line; the scripts read the file it wrote and decide the move.
+Builder and reviewer run on different models. Each agent replies with one line. The scripts read the file the agent wrote and decide the next move.
 
-| Script | Job |
+## Scripts
+
+| Script | What it does |
 |---|---|
-| `onboarding/bin/job` | The only writer of job state. Refuses illegal moves, a fourth parallel job, and moves without evidence. Moves labels and posts comments. |
-| `onboarding/bin/gate` | Judges a branch. See below. |
-| `onboarding/bin/merge` | Syncs with main, runs the gate again, merges. The only thing that merges. |
+| `onboarding/bin/job` | The only writer of job state. It refuses illegal moves, a fourth parallel job and moves without evidence. It moves the labels and posts the comments. |
+| `onboarding/bin/gate` | Judges a branch. |
+| `onboarding/bin/merge` | Syncs with main, runs the gate again and merges. Nothing else merges. |
 | `onboarding/bin/labels` | Creates the labels. |
 
 ## The gate
 
-The gate is the only thing between an agent and a merge, so it has no skips: a missing tool or a check that cannot run is a failure. It is read from the main checkout, never from the branch it judges.
+The gate is the only check between an agent and a merge. It has no skips. A missing tool, or a check that cannot run, is a failure. The gate is read from the main checkout, not from the branch it judges.
 
-1. Tools present; policy unit tests; module `terraform test`.
-2. The branch only adds one new `requests/GH-<n>-<service>/` with its three files. The judging files are identical to `origin/main`.
-3. `main.tf` is the template with only the five values changed. This is checked before Terraform runs.
-4. No other folder already onboards the same team and service.
-5. `terraform validate` and `plan` against a throwaway `vault server -dev`; Conftest on the plan JSON.
-6. Apply to the throwaway Vault, then act as the service with a token that carries only the new policy. It must read each of its paths. It must get HTTP 403 `permission denied` on write, delete, a sibling service, another team and `sys/`. The role must have one service account, one namespace and only its own policy.
+It checks, in this order:
+
+1. The tools are present. The policy unit tests and the module's `terraform test` pass.
+2. The branch only adds one new `requests/GH-<n>-<service>/` with its three files. The files that judge it are identical to `origin/main`.
+3. `main.tf` is the template with only the five values changed. This runs before Terraform does.
+4. No other folder onboards the same team and service.
+5. `terraform validate` and `plan` work against a throwaway `vault server -dev`. Conftest passes on the plan JSON.
+6. The request is applied to the throwaway Vault. A token with only the new policy must read each of its paths. It must get HTTP 403 `permission denied` on write, on delete, on a sibling service, on another team and on `sys/`. The role must have one service account, one namespace and only its own policy.
+
+You can run the checks yourself:
 
 ```bash
-onboarding/bin/gate --request PE-001-payments-api    # the whole gate on the worked example
-conftest verify -p policies/conftest                 # policy unit tests
-python3 .claude/hooks/guard_test.py                  # every hook denial
+onboarding/bin/gate --request PE-001-payments-api
 ```
 
-The line never applies to a real Vault. After a merge, a person applies the request to their own local Vault if they want it there.
+```bash
+conftest verify -p policies/conftest
+```
+
+```bash
+python3 .claude/hooks/guard_test.py
+```
+
+The first runs the whole gate on the example request. The second runs the policy unit tests. The third tests every denial of the hook.
 
 ## Rules
 
-They are in [CLAUDE.md](CLAUDE.md). The ones a shell command must not break are enforced by a hook, [.claude/hooks/guard.py](.claude/hooks/guard.py): no merge by an agent or a session, no push outside `onboard/*`, no force push, no `terraform apply` or Vault write to anything but 127.0.0.1, no agent edits to the gate.
+The rules are in [CLAUDE.md](CLAUDE.md). A hook, [.claude/hooks/guard.py](.claude/hooks/guard.py), enforces the ones a shell command could break:
 
-## Try it without GitHub
-
-`ONBOARD_OFFLINE=1` makes `onboarding/bin/job` skip every GitHub call and print what it would have done. With the sample issues in `onboarding/examples/`:
-
-```bash
-export ONBOARD_OFFLINE=1
-onboarding/bin/job create 101 --from-file onboarding/examples/issue-101.json
-onboarding/bin/job queue
-```
+- no merge by an agent or a session
+- no push outside `onboard/*`
+- no force push
+- no `terraform apply` or Vault write to anything but 127.0.0.1
+- no agent edits to the gate
 
 ## Layout
 
@@ -112,11 +132,15 @@ policies/conftest/             what a plan may contain, with unit tests
 onboarding/bin/                job, gate, merge, labels
 onboarding/board/              the local board
 .claude/                       agents, the /onboard skill, the guard hook
-docs/                          architecture and decisions
+docs/                          how to run it, architecture, decisions
 ```
 
-More: [docs/architecture.md](docs/architecture.md), [docs/adr/001-autonomous-onboarding-line.md](docs/adr/001-autonomous-onboarding-line.md).
+## More
+
+- [docs/run.md](docs/run.md): how to run it, step by step
+- [docs/architecture.md](docs/architecture.md): how it is built and why
+- [docs/adr/001-autonomous-onboarding-line.md](docs/adr/001-autonomous-onboarding-line.md): the decision
 
 ## Licence
 
-MIT. The approach (one orchestrating skill, one agent per role, script-owned state, a gate read from the main checkout) follows the idea of zazencodes' software-factory-claude-code-v2. No code is taken from it.
+MIT. The approach follows the idea of zazencodes' software-factory-claude-code-v2: one orchestrating skill, one agent per role, state owned by a script, a gate read from the main checkout. No code is taken from it.
