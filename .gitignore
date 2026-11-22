@@ -1,0 +1,17 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Onboarding line: per-job state and worktrees live only on the operator's machine
+onboarding/jobs/
+onboarding/.cache/
+.worktrees/
+
+# Local
+.env
+.DS_Store
+__pycache__/
