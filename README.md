@@ -1,147 +1,130 @@
 # vault-onboarding-line
 
-Onboarding a service to Vault is the same change every time: a policy, a Kubernetes auth role and a few secret paths. Because it is small and repetitive, it tends to get approved without being read, and a wrong one gives a service access to another team's secrets.
+Onboarding a service to Vault is always the same small change: a policy, a Kubernetes auth role and a few secret paths. It's boring work, and boring work gets approved without anyone really reading it. That's fine until one of those policies gives a service access to another team's secrets.
 
-I built this repository to see how much of that work I could hand to agents without losing control of it. A GitHub issue asking for an onboarding goes in, and a merged pull request with the spec, the plan and the Terraform comes out, with nobody approving the phases in between. A person comes back in at two points: when the line has a question or is not sure about a request, and at the very end, where it shows what it wants to write to Vault and waits for someone to apply it.
+I wanted to see how far I could automate this with Claude Code without losing control of it. You open a GitHub issue asking for an onboarding and you get back a merged pull request with the spec, the plan and the Terraform. Nobody approves the steps in between. Then it stops and tells you: this is everything we created, if you are happy, apply it.
 
-It runs in Claude Code. The agents do the parts that need judgement, like reading a request or reviewing a pull request. Everything that has to behave the same way every time (the state of a job, the gate, the merge and the apply) is a plain script, because I don't want a language model deciding whether a check passed.
+So the agents do the writing, scripts do the checking, and a person is still the one who changes Vault.
 
-## How a request moves
+![The board: the lanes on top, the steps of one job below](docs/img/board.png)
 
-```
-issue labelled `onboard`
-      │
-intake ──── needs-info → asks on the issue      rejected → says why, closes
-      │ accepted
-spec-writer → requests/<id>/01-spec/spec.md
-      │
-builder ───→ 02-plan/plan.md, 03-terraform/main.tf, draft PR "Closes #n"
-      │          ▲
-gate (script) ─FAIL┤
-      │ PASS       │
-reviewer ─CHANGES──┘        at most 3 rounds, then a person
-      │ PASS
-approver ── APPROVE  → merge script: sync with main, gate again, merge
-      │  └─ ESCALATE → PR ready for you, issue labelled onboard:needs-human
-      │ merged
-ready to apply → you run onboarding/bin/apply: it shows the policy, the role
-                 and the plan, asks, applies, and checks the Vault
-```
+## How it works
 
-Intake reads the issue and decides whether the request can go down the line at all. If a value is missing it asks the author on the issue and waits for the answer. If the request asks for something this line must never grant, such as another team's secret paths, intake rejects it and explains why.
+1. You file an issue with the "Onboard a service to Vault" form. The form adds the `onboard` label.
+2. Intake reads the issue. If a value is missing it asks on the issue and waits. If the request asks for something it shouldn't, like another team's secret paths, it rejects it and says why.
+3. The spec-writer turns the issue into a spec with requirements R1 to R5.
+4. The builder writes the plan and the Terraform from the spec and opens a draft pull request. It never reads the issue, only the spec.
+5. The gate runs. The gate is a script, not an agent. If it fails, the builder gets the report and tries again.
+6. A reviewer checks the pull request against the issue and the spec. It runs on a different model than the builder.
+7. An approver decides whether to merge or to hand the pull request to a person.
+8. The merge script runs the gate one more time and merges.
+9. You run `onboarding/bin/apply <issue>`. It shows you what will change in Vault and asks before it does anything.
 
-An accepted request gets a spec, written from the issue with the same R1 to R5 structure I use for spec-driven work. The builder then works from the spec only. It never reads the issue, so whatever a stranger typed into GitHub stays two steps away from the agent that has a shell. The builder writes the plan and the Terraform and opens a draft pull request.
-
-From there a script takes over. The gate judges the branch, and if it fails the job goes back to the builder with the report. When the gate passes, a reviewer on a different model compares the issue, the spec, the plan and the Terraform, and an approver takes the final decision to merge or to hand the pull request to a person. A job gets three rounds, and after the third it goes to a person in any case.
+A job gets three rounds of build, gate and review. If it's still not right after the third, it goes to a person.
 
 ## The gate
 
-This repository grew out of an earlier one of mine, [sdd-tf-vault](https://github.com/pablogd-hashi/sdd-tf-vault), where a person approved every phase. When I looked closely at its validation step, I found that the policy checks had never actually run, that the script counted every skipped check as a pass, and that the one policy rule it had would have accepted update and delete on a whole team's secrets. The approvals were doing all the work, and nobody knew it.
+If nobody approves each step, something else has to catch a bad policy. That's the job of `onboarding/bin/gate`.
 
-So the gate here is built the other way round, as the one check that has to be enough without anyone looking. It has no skips, which means a missing tool or a check that cannot run is a failure. It is always read from the main checkout and never from the branch it is judging, so a branch cannot change the rules it is measured against.
+I'm strict about it because of what I found in the previous version of this project, [sdd-tf-vault](https://github.com/pablogd-hashi/sdd-tf-vault). It had a validation step, a person approved every phase, and when I went back to look, the policy checks had never run at all. The script treated a skipped check as a pass. So this gate has no skips. If a tool is missing or a check can't run, it fails.
 
-What it checks, in order:
+This is what it does:
 
-1. The tools are installed, and the policy unit tests and the module's own `terraform test` pass.
-2. The branch only adds one new `requests/GH-<n>-<service>/` folder with its three files, and the files that do the judging are identical to `origin/main`.
-3. `main.tf` is the template with only the five values changed. This happens before Terraform is allowed to touch the file.
-4. No other folder already onboards the same team and service.
-5. `terraform validate` and `plan` run against a throwaway `vault server -dev`, and Conftest reads the plan and checks every path and capability in the policy.
-6. The request is applied to that throwaway Vault, and the gate then logs in as the service, with a token that carries only the new policy. It has to be able to read its own paths. It has to be refused, with a real HTTP 403 `permission denied`, on a write, on a delete, on a sibling service, on another team and on `sys/`.
+- It checks that the branch only adds one new folder under `requests/` and touches nothing else.
+- It checks that `main.tf` is the template with the five values filled in. This happens before Terraform gets near the file.
+- It checks that no other request already onboards the same service.
+- It runs `terraform plan` and then Conftest on the plan, which looks at every path and capability in the policy.
+- It starts a throwaway Vault, applies the request there and logs in with a token that has only the new policy. That token must be able to read its own secrets, and it must get `permission denied` when it tries to write, delete, read another team's secrets or touch `sys/`.
 
-The last check is the one I care about most. A plan can look right and still grant more than you meant. Asking a real Vault what the policy allows takes about ten seconds and removes the doubt.
+That last check is the one I trust most. A plan can look fine and still grant more than you meant, and asking a real Vault takes about ten seconds.
 
-You can run the whole thing yourself on the example request:
+The gate always runs from `main`, never from the branch it is checking, so a branch can't change its own rules.
+
+You can try it on the example request:
 
 ```bash
 onboarding/bin/gate --request PE-001-payments-api
 ```
 
-## The last step is yours
+## Applying
 
-The line stops at the merge, and at that point nothing is in Vault yet. I want the work to be automatic, but I still want a person to look at what is about to change in Vault and be the one who releases it.
+After the merge nothing is in Vault yet. You apply it yourself:
 
 ```bash
 onboarding/bin/apply 12
 ```
 
-The script plans the merged request against your Vault and shows you the policy in full, the role with its service account and namespace, the secret paths and the Terraform plan line. It applies only if you type `yes`, and it applies the plan it showed you, not a new one. Afterwards it checks the Vault the same way the gate does, posts the result on the issue and closes it.
+The script shows you the policy, the role and the Terraform plan, and waits for you to type `yes`. It then applies exactly the plan it showed you, checks the result on the Vault the same way the gate does, and closes the issue.
 
-An agent cannot do this for you. The script refuses to run without a terminal, the hook blocks the command for agents and for Claude Code sessions, and it only accepts a Vault on 127.0.0.1. For a shared Vault this step belongs in a pipeline with an approval and a short-lived token. There is an example of that in [docs/examples/apply-shared-vault.yml](docs/examples/apply-shared-vault.yml), which I have not run yet.
-
-## Watching it work
-
-I wanted to be able to follow a job without opening Claude Code, so every job is visible in two places.
-
-On GitHub, the issue carries one label at a time that tells you the stage: `onboard`, then `onboard:intake`, `onboard:spec`, `onboard:build`, `onboard:review`, `onboard:approve` and `onboard:ready-to-apply`. Two more labels, `onboard:needs-info` and `onboard:needs-human`, mean the line is waiting for someone. Every step also leaves a comment. Intake's decision goes on the issue, and each gate report, the review and the approver's decision go on the pull request, so somebody who only looks at GitHub can still follow a job from start to end.
-
-Locally there is a small board, which is one HTML page and a Python standard-library server.
-
-![The board: the lanes on top, the steps of one job below](docs/img/board.png)
-
-Each job is a card in the lane of its stage, with the gate and review result of every round, the risk and the time it has taken. The panel under the lanes shows the steps of one job and follows whichever job moved last. When a job is ready to apply, that panel shows the Terraform plan, so you can read what will be written to Vault before you run the apply script.
-
-![The Terraform plan of a merged job, shown on the board](docs/img/step-to-apply.png)
+Agents can't run this step. The script needs a real terminal, a hook blocks the command inside Claude Code, and it only talks to a Vault on 127.0.0.1. For a shared Vault I would move this step to a pipeline with an approval and a short-lived token. There is an example in [docs/examples/apply-shared-vault.yml](docs/examples/apply-shared-vault.yml), but I haven't run it.
 
 ## Run it
 
-You need `git`, `gh` (logged in), `terraform`, `vault`, `conftest`, `python3` 3.9 or newer, and Claude Code. There is no Docker, no framework and no build step.
+You need `git`, `gh` (logged in), `terraform`, `vault`, `conftest`, `python3` 3.9 or newer and Claude Code. No Docker, no framework, no build step.
 
-[docs/run.md](docs/run.md) is the full guide, from installing the tools to an applied request, with five examples to try. The short version is two commands, one to create the labels (once per repository) and one to start the board at http://127.0.0.1:8765:
+The full guide is [docs/run.md](docs/run.md). It goes from installing the tools to an applied request and has five examples to try. The short version:
+
+Create the labels, once per repository:
 
 ```bash
 onboarding/bin/labels
 ```
 
+Start the board at http://127.0.0.1:8765:
+
 ```bash
 python3 onboarding/board/serve.py
 ```
 
-Then file a request with the "Onboard a service to Vault" issue form, and in Claude Code, in this repository:
+File an issue with the form, then open Claude Code in this repository:
 
 | Command | What it does |
 |---|---|
-| `/onboard run` | Runs every open `onboard` issue, three at a time, and picks up unfinished jobs. |
+| `/onboard run` | Runs every open `onboard` issue, three at a time. Also picks up unfinished jobs. |
 | `/onboard run 12` | Runs issue 12 only. |
-| `/onboard where is 12?` | Answers from the job's state and files. |
-| `/onboard for 12: use namespace identity-prod` | Sends your feedback to the builder, for a job that is waiting for you. |
-| `/onboard onboard search-api for team discovery ...` | Files a new request for you. |
+| `/onboard where is 12?` | Tells you where the job is. |
+| `/onboard for 12: use namespace identity-prod` | Sends your feedback to the builder, when a job is waiting for you. |
+| `/onboard onboard search-api for team discovery ...` | Files the issue for you. |
 
-## What is in here
+## Following a job
 
-There is one agent per role, and each of them reads files, writes one file and replies with one line. The scripts read that file and decide what happens next, so an agent's word is never what moves a job.
+You don't need to keep Claude Code in front of you to know what's going on.
+
+On GitHub, the issue has one label that tells you the stage: `onboard:intake`, `onboard:spec`, `onboard:build`, `onboard:review`, `onboard:approve`, `onboard:ready-to-apply`. The labels `onboard:needs-info` and `onboard:needs-human` mean it's waiting for someone. Every step also leaves a comment, on the issue or on the pull request.
+
+The board is one HTML page and a small Python server. Each job is a card that moves from lane to lane, and the panel below shows what each step produced. When a job is ready to apply, the panel shows the Terraform plan, so you can read it before you run the apply script.
+
+![The Terraform plan of a merged job, shown on the board](docs/img/step-to-apply.png)
+
+## What is in the repo
+
+```
+requests/<id>/                 the spec, plan and Terraform for one service
+requests/_template/            the shape they have to follow
+terraform/modules/vault-service-onboard/   the only module a request can call
+terraform/platform/            the Kubernetes auth mount
+policies/conftest/             the policy rules and their tests
+onboarding/bin/                job, gate, merge, apply, labels
+onboarding/board/              the board
+.claude/                       the agents, the /onboard skill, the hook
+docs/                          run guide, architecture, decision record
+```
+
+There are five agents, one per role. Each one reads some files, writes one file and answers with one line.
 
 | Agent | Reads | Writes | Shell |
 |---|---|---|---|
-| `intake` | the issue file | `intake.md`: accepted, needs-info or rejected | no |
-| `spec-writer` | the issue file, intake | `01-spec/spec.md` with R1 to R5 | no |
-| `builder` | the spec, the last gate and review | `02-plan/plan.md`, `03-terraform/main.tf`, the draft PR | yes |
-| `reviewer` | spec, plan, diff, gate report | `review.md`: PASS or CHANGES | read-only |
+| `intake` | the issue | `intake.md`: accepted, needs-info or rejected | no |
+| `spec-writer` | the issue and intake's answer | `01-spec/spec.md` | no |
+| `builder` | the spec, the last gate report and review | `02-plan/plan.md`, `03-terraform/main.tf`, the pull request | yes |
+| `reviewer` | the spec, the plan, the diff, the gate report | `review.md`: PASS or CHANGES | read-only |
 | `approver` | the whole job | `decision.md`: APPROVE or ESCALATE | read-only |
 
-| Script | What it does |
-|---|---|
-| `onboarding/bin/job` | The only writer of job state. It refuses illegal moves, a fourth parallel job and moves without evidence, and it moves the labels and posts the comments. |
-| `onboarding/bin/gate` | Judges a branch. |
-| `onboarding/bin/merge` | Syncs with main, runs the gate again and merges. Nothing else merges. |
-| `onboarding/bin/apply` | The person's step: shows what will be written to Vault, asks, applies and checks. |
-| `onboarding/bin/labels` | Creates the labels. |
+The scripts decide what happens next. `onboarding/bin/job` is the only thing that changes the state of a job, and it checks the file the agent wrote, not what the agent said. `gate` checks a branch, `merge` is the only thing that merges, and `apply` is the step you run yourself.
 
-```
-requests/<id>/                 01-spec, 02-plan, 03-terraform for one service
-requests/_template/            the shapes they must follow
-terraform/modules/vault-service-onboard/   the only module a request may call
-terraform/platform/            the Kubernetes auth mount
-policies/conftest/             what a plan may contain, with unit tests
-onboarding/bin/                job, gate, merge, apply, labels
-onboarding/board/              the local board
-.claude/                       agents, the /onboard skill, the guard hook
-docs/                          how to run it, architecture, decisions
-```
+## The rules
 
-## The rules, and who enforces them
-
-The rules the agents work under are in [CLAUDE.md](CLAUDE.md): never invent a value, use the module and nothing else, least privilege, one request per service, and so on. Instructions like these are easy to write and easy for a model to forget, so the ones a shell command could break are enforced by a hook, [.claude/hooks/guard.py](.claude/hooks/guard.py), which refuses the call before it runs:
+The rules for the agents are in [CLAUDE.md](CLAUDE.md): never invent a value, only use the module, least privilege, one request per service. But telling a model "don't merge" is not enough for me, so the rules that a shell command could break are blocked by a hook, [.claude/hooks/guard.py](.claude/hooks/guard.py):
 
 - no merge by an agent or a session
 - no push outside `onboard/*`, and no force push
@@ -149,18 +132,18 @@ The rules the agents work under are in [CLAUDE.md](CLAUDE.md): never invent a va
 - no agent edits to the gate, the policies, the module or the hook
 - no apply by an agent or a session
 
-The hook matches the text of a command, so it stops mistakes rather than a determined attacker. The protection that does not depend on matching text is the gate reading its own files from the main checkout.
+The hook matches the text of the command, so it stops mistakes. It won't stop someone who is really trying. What doesn't depend on matching text is the gate running from `main`.
 
-## What it does not do
+## What it doesn't do
 
-The line handles one shape of request. If an onboarding needs a change to the module, to the platform layer or to the policies, intake rejects it and a person does that work. The line does not resolve merge conflicts either, it escalates them. And it has only ever applied to a local Vault. The path to a shared one is described above, not built.
+It handles one kind of request. If an onboarding needs a change to the module, the platform layer or the policies, intake rejects it and a person does that work. It doesn't fix merge conflicts, it escalates them. And so far it has only applied to a local Vault.
 
 ## More
 
-- [docs/run.md](docs/run.md) explains how to run it, step by step, with examples
-- [docs/architecture.md](docs/architecture.md) explains how it is built and why
-- [docs/adr/001-autonomous-onboarding-line.md](docs/adr/001-autonomous-onboarding-line.md) records the decision
+- [docs/run.md](docs/run.md): how to run it, step by step
+- [docs/architecture.md](docs/architecture.md): how it's built and why
+- [docs/adr/001-autonomous-onboarding-line.md](docs/adr/001-autonomous-onboarding-line.md): the decision record
 
 ## Credit and licence
 
-The approach follows the idea of zazencodes' [software-factory-claude-code-v2](https://github.com/zazencodes/zazencodes-season-3/tree/main/src/software-factory-claude-code-v2): one orchestrating skill, one agent per role, state owned by a script, and a gate read from the main checkout. No code is taken from it. This repository is MIT licensed.
+The idea comes from zazencodes' [software-factory-claude-code-v2](https://github.com/zazencodes/zazencodes-season-3/tree/main/src/software-factory-claude-code-v2): one skill that orchestrates, one agent per role, a script that owns the state, and a gate that runs from the main checkout. I took the idea and none of the code. This repository is MIT licensed.

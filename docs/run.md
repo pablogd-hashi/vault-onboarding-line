@@ -1,6 +1,6 @@
 # How to run it
 
-This guide takes you from a laptop with nothing installed to a service onboarded in Vault. You do steps 1 to 5 once. Steps 6 to 11 are what you repeat for every request, and after the first time they take a few minutes.
+This guide starts with a laptop that has nothing installed and ends with a service onboarded in Vault. Steps 1 to 5 you do once. Steps 6 to 11 you repeat for every request, and they take a few minutes.
 
 ## 1. Install the tools
 
@@ -248,7 +248,7 @@ You can ask about a job at any time:
 
 ## 11. Apply it
 
-The line stops at the merge, and at that point nothing is in Vault yet. The last step is yours. Claude cannot run it for you, because the script needs a terminal with a person at it and the hook refuses the command for agents and sessions.
+After the merge nothing is in Vault yet. You apply it yourself. Claude can't run this step: the script needs a real terminal, and the hook blocks the command inside Claude Code.
 
 The merged request is on `main`:
 
@@ -386,9 +386,9 @@ If all of that holds, the onboarding worked.
 
 ## Examples to try
 
-These five examples show the line saying yes and saying no. Each command files an issue with the same fields as the form. Run the commands in the repository folder. `gh` prints the issue number.
+Here are five things to try, including the cases where the line says no. Each command files an issue with the same fields as the form. Run them in the repository folder. `gh` prints the issue number.
 
-I ran examples 1, 2, 3 and 5, and what they did is described below. Example 4 has not run as three real issues at once yet, so its description is what the line is built to do.
+Examples 1, 2, 3 and 5 have run for real, and I describe what happened. Example 4 hasn't run with three real issues yet, so for that one I describe what should happen.
 
 ### 1. A plain onboarding
 
